@@ -1,0 +1,96 @@
+version: "3.9"
+
+services:
+  # -- API Service --
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+    volumes:
+      - ./config:/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 1
+
+  # -- Worker Service (follow-up dispatch) --
+  worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+    volumes:
+      - ./config:/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python -m job_queue.consumer
+
+  # -- Voice Service (Pipecat pipeline manager) --
+  voice:
+    build: .
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+    volumes:
+      - ./config:/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python -m voice.server
+
+  # -- Redis --
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # -- PostgreSQL --
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: converse_agent
+      POSTGRES_USER: converse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U converse -d converse_agent"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  pg_data:

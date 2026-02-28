@@ -1,0 +1,586 @@
+# ──────────────────────────────────────────────────────────────
+#  Agentic Dialogue Flows — Examples
+#
+#  These flows demonstrate the full agentic template system:
+#  - Dynamic variable resolution from live context
+#  - Parallel tool calls for data gathering
+#  - Conditional branching based on real-time data
+#  - LLM-generated contextual content
+#  - Multi-turn collection with intent/entity extraction
+#  - Sub-flow composition (call_flow)
+#  - Memory accumulation (remember)
+#  - Lifecycle hooks (on_enter, on_exit)
+#  - Channel-aware rendering
+# ──────────────────────────────────────────────────────────────
+
+flows:
+
+  # ═══════════════════════════════════════════════════════════
+  #  PAYMENT REMINDER — Full agentic flow with all features
+  # ═══════════════════════════════════════════════════════════
+
+  - id: payment_reminder_agentic
+    name: Agentic Payment Reminder
+    description: >
+      Intelligent payment reminder that checks real-time status,
+      adapts tone based on history, handles objections, and remembers
+      context across interactions.
+    version: "2.0"
+    tags:
+      - "process:payment_collection"
+      - "state:outreach_1"
+      - "state:outreach_2"
+      - "state:outreach_3"
+    priority: 10
+    objective: "Collect outstanding payment while maintaining positive relationship"
+    composable: true
+    success_criteria:
+      - "Contact acknowledges the payment obligation"
+      - "Payment is confirmed or a concrete payment date is committed"
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        default: "there"
+      - name: amount
+        source: business_data.amount
+        format: currency
+        required: true
+      - name: due_date
+        source: business_data.due_date
+        format: date
+      - name: invoice_number
+        source: business_data.invoice_number
+        default: ""
+      - name: days_overdue
+        source: business_data.days_overdue
+        default: 0
+
+    guards:
+      - field: business_data.amount
+        operator: gt
+        value: 0
+
+    default_channel_config:
+      whatsapp:
+        tone: concise
+        max_length: 800
+      email:
+        tone: professional
+        max_length: 2000
+      voice:
+        tone: conversational
+        max_length: 300
+
+    on_enter:
+      - type: remember
+        key: reminder_started
+        value: "{{_flow_id}} at {{_channel}}"
+        scope: conversation
+      - type: log
+        message: "Starting payment reminder for {{contact_name}}, amount {{amount}}"
+
+    on_exit:
+      - type: remember
+        key: last_reminder_outcome
+        value: "completed"
+        scope: contact
+
+    on_error:
+      - type: remember
+        key: last_reminder_outcome
+        value: "failed"
+        scope: contact
+
+    steps:
+      # Step 1: Check business hours — don't disturb off-hours
+      - id: check_hours
+        type: gate
+        description: Only proceed during business hours
+        conditions:
+          - field: _skip_hours_check
+            operator: eq
+            value: true
+        fail_goto: check_hours_tool
+
+      - id: check_hours_tool
+        type: tool_call
+        description: Check if we're within business hours
+        tool:
+          endpoint: "$check_business_hours"
+          result_key: hours_info
+        next: hours_gate
+
+      - id: hours_gate
+        type: gate
+        conditions:
+          - field: hours_info.is_business_hours
+            operator: eq
+            value: true
+        fail_goto: off_hours_msg
+
+      # Step 2: Gather data in parallel (fast!)
+      - id: gather_data
+        type: parallel
+        description: Fetch attempt info and conversation age concurrently
+        parallel_tools:
+          - endpoint: "$get_attempt_summary"
+            result_key: attempt_info
+          - endpoint: "$get_conversation_age"
+            result_key: conv_age
+        next: route_by_attempt
+
+      # Step 3: Route based on attempt count
+      - id: route_by_attempt
+        type: branch
+        arms:
+          - conditions:
+              - field: attempt_info.is_first_attempt
+                operator: eq
+                value: true
+            goto: first_contact
+            description: First outreach — friendly
+          - conditions:
+              - field: attempt_info.urgency
+                operator: eq
+                value: high
+            goto: urgent_reminder
+            description: High urgency — firm tone
+          - goto: standard_reminder
+            description: Standard follow-up
+
+      # Branch A: First contact
+      - id: first_contact
+        type: generate
+        description: Generate a warm first outreach
+        system_prompt: >
+          You are a polite business follow-up agent. This is the FIRST
+          contact with the customer about this payment. Be warm, professional,
+          and non-confrontational. Mention the specific invoice/amount.
+        user_prompt: >
+          Contact: {{contact_name}}
+          Amount due: {{amount}}
+          Invoice: {{invoice_number}}
+          Due date: {{due_date}}
+          Days overdue: {{days_overdue}}
+          
+          Write a friendly first payment reminder. Keep it brief for {{_channel}}.
+        constraints:
+          max_tokens: 300
+          temperature: 0.7
+        channel_variants:
+          - channel: whatsapp
+            tone: "Keep under 3 sentences. Use one emoji."
+          - channel: email
+            tone: "Professional email style with greeting and sign-off."
+        next: record_outreach
+
+      # Branch B: Standard follow-up
+      - id: standard_reminder
+        type: generate
+        description: Generate contextual follow-up
+        system_prompt: >
+          You are a professional follow-up agent. This is a FOLLOW-UP
+          contact (not the first). Be polite but clear about the obligation.
+          Reference previous attempts if known.
+        user_prompt: >
+          Contact: {{contact_name}}
+          Amount: {{amount}}
+          Invoice: {{invoice_number}}
+          Attempt #{{attempt_info.attempt_count}}, {{attempt_info.remaining_attempts}} remaining
+          Days overdue: {{days_overdue}}
+          
+          Previous memory: {{memory.last_reminder_outcome}}
+          
+          Write a follow-up payment reminder appropriate for attempt #{{attempt_info.attempt_count}}.
+        constraints:
+          temperature: 0.6
+        next: record_outreach
+
+      # Branch C: Urgent reminder
+      - id: urgent_reminder
+        type: generate
+        description: Generate urgent reminder with consequences
+        system_prompt: >
+          You are a professional but firm follow-up agent. This is a
+          high-urgency situation. Be direct about consequences while
+          remaining professional. Mention specific deadlines.
+        user_prompt: >
+          Contact: {{contact_name}}
+          Amount: {{amount}}
+          Invoice: {{invoice_number}}
+          Attempt #{{attempt_info.attempt_count}} — FINAL ATTEMPTS
+          Days overdue: {{days_overdue}}
+          
+          Write an urgent payment reminder. Be firm but professional.
+          Mention that further action may be needed without explicit threats.
+        constraints:
+          temperature: 0.4
+        next: record_outreach
+
+      # Off-hours message
+      - id: off_hours_msg
+        type: message
+        content: ""
+        next: schedule_retry
+        channel_variants:
+          - channel: whatsapp
+            skip: true
+          - channel: email
+            skip: true
+
+      - id: schedule_retry
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: delay_for_business_hours
+
+      # Step 4: Remember what we did and emit context change
+      - id: record_outreach
+        type: remember
+        remember_key: "outreach_attempt_{{attempt_info.attempt_count}}"
+        remember_value: "Sent via {{_channel}} on {{due_date}}"
+        remember_type: event
+        remember_scope: conversation
+        next: collect_response
+
+      # Step 5: Wait for user response
+      - id: collect_response
+        type: collect
+        description: Wait for contact to respond
+        expected_intents:
+          - payment_confirmed
+          - payment_promised
+          - payment_issue
+          - question
+          - escalate
+        entity_extraction:
+          - amount
+          - date
+          - reference_number
+        timeout_seconds: 172800  # 48 hours
+        timeout_goto: timeout_handler
+
+      # Step 6: Handle timeout (no response after 48h)
+      - id: timeout_handler
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: timeout
+          trigger_value: no_response_48h
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  VERIFY PAYMENT STATUS — Reusable sub-flow
+  # ═══════════════════════════════════════════════════════════
+
+  - id: verify_payment_status
+    name: Verify Payment Status
+    description: Check backend for payment status and update context
+    composable: true
+    tags:
+      - "process:payment_collection"
+      - "sub_flow"
+    priority: 0
+
+    variables:
+      - name: invoice_id
+        source: business_data.invoice_number
+        required: true
+
+    steps:
+      - id: check_backend
+        type: tool_call
+        tool:
+          endpoint: check_payment_status
+          payload_template:
+            invoice_id: "{{invoice_id}}"
+          result_key: payment_status
+
+      - id: evaluate
+        type: branch
+        arms:
+          - conditions:
+              - field: payment_status.paid
+                operator: eq
+                value: true
+            goto: confirmed
+          - conditions:
+              - field: payment_status.partial_amount
+                operator: gt
+                value: 0
+            goto: partial
+          - goto: unpaid
+
+      - id: confirmed
+        type: message
+        content: "Payment confirmed"
+        next: record_verified
+
+      - id: partial
+        type: message
+        content: "Partial payment of {{payment_status.partial_amount}} received"
+        next: record_verified
+
+      - id: unpaid
+        type: message
+        content: ""
+        next: record_verified
+
+      - id: record_verified
+        type: remember
+        remember_key: payment_verified
+        remember_value: "{{payment_status.paid}}"
+        remember_type: fact
+        remember_scope: conversation
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  FEEDBACK COLLECTION — Multi-turn with LLM routing
+  # ═══════════════════════════════════════════════════════════
+
+  - id: feedback_collection_flow
+    name: Intelligent Feedback Collection
+    description: >
+      Collects feedback using LLM routing to dynamically
+      determine the next question based on previous answers.
+    tags:
+      - "process:feedback_collection"
+      - "state:collecting"
+    priority: 5
+    objective: "Collect meaningful, actionable feedback from the contact"
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        default: "valued customer"
+      - name: service_type
+        source: business_data.service_type
+        default: "our service"
+
+    on_exit:
+      - type: remember
+        key: feedback_collected
+        value: "true"
+        scope: contact
+
+    steps:
+      - id: greeting
+        type: message
+        content: >
+          Hi {{contact_name}}! We'd love to hear about your experience
+          with {{service_type}}. Your feedback helps us improve.
+        channel_variants:
+          - channel: whatsapp
+            content_override: "Hi {{contact_name}}! Quick feedback on {{service_type}}? 🙏"
+
+      - id: ask_rating
+        type: message
+        content: "On a scale of 1-10, how would you rate your experience?"
+        next: collect_rating
+
+      - id: collect_rating
+        type: collect
+        expected_intents:
+          - positive_feedback
+          - complaint
+          - question
+        entity_extraction:
+          - amount
+        timeout_seconds: 86400
+        timeout_goto: gentle_nudge
+        next: route_feedback
+
+      # LLM decides what to ask next based on the rating
+      - id: route_feedback
+        type: llm_route
+        system_prompt: >
+          Based on the user's feedback rating, decide the best follow-up.
+          If positive (7+), ask what they liked most.
+          If neutral (4-6), ask what could improve.
+          If negative (1-3), acknowledge and ask for details.
+        user_prompt: "Rating/response: {{user_response}}"
+        arms:
+          - goto: positive_followup
+            description: "Rating is 7-10 — ask what they liked"
+          - goto: neutral_followup
+            description: "Rating is 4-6 — ask for improvement suggestions"
+          - goto: negative_followup
+            description: "Rating is 1-3 — empathize and collect complaint"
+
+      - id: positive_followup
+        type: generate
+        system_prompt: "You're collecting feedback from a happy customer. Be warm and appreciative."
+        user_prompt: >
+          The customer rated us {{extracted_amount}}/10.
+          Ask what specific aspect they enjoyed most. Keep it brief.
+        next: collect_detail
+
+      - id: neutral_followup
+        type: generate
+        system_prompt: "You're collecting feedback from a neutral customer. Be curious and non-defensive."
+        user_prompt: >
+          The customer gave a middle rating.
+          Ask what specific changes would improve their experience. Keep it brief.
+        next: collect_detail
+
+      - id: negative_followup
+        type: generate
+        system_prompt: "You're collecting feedback from an unhappy customer. Be empathetic and solution-oriented."
+        user_prompt: >
+          The customer gave a low rating.
+          Acknowledge their frustration, apologize briefly, and ask for specific details.
+        next: collect_detail
+
+      - id: collect_detail
+        type: collect
+        expected_intents:
+          - positive_feedback
+          - complaint
+          - question
+        timeout_seconds: 86400
+        next: thank_and_record
+
+      - id: thank_and_record
+        type: generate
+        system_prompt: "Thank the customer warmly for their detailed feedback. Mention their feedback will be acted on."
+        user_prompt: >
+          Customer feedback detail: {{user_response}}
+          Write a brief thank-you that references their specific feedback.
+        next: store_feedback
+
+      - id: store_feedback
+        type: remember
+        remember_key: feedback_detail
+        remember_value: "{{user_response}}"
+        remember_type: fact
+        remember_scope: contact
+        next: emit_feedback_event
+
+      - id: emit_feedback_event
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: feedback_collected
+
+      - id: gentle_nudge
+        type: message
+        content: >
+          Hi {{contact_name}}, just a gentle reminder — we'd still love
+          to hear your feedback when you have a moment!
+        channel_variants:
+          - channel: whatsapp
+            content_override: "Hi {{contact_name}}, still keen to hear your thoughts when you're free! 😊"
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  ESCALATION HANDLER — Sub-flow composition demo
+  # ═══════════════════════════════════════════════════════════
+
+  - id: escalation_handler
+    name: Intelligent Escalation
+    description: >
+      Handles escalation by calling the verify_payment_status sub-flow,
+      then routing based on whether the issue is payment-related or service-related.
+    tags:
+      - "process:payment_collection"
+      - "state:escalated"
+    priority: 8
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        default: "there"
+
+    steps:
+      - id: verify_first
+        type: call_flow
+        description: Check payment status before escalating
+        sub_flow_id: verify_payment_status
+        sub_flow_input:
+          invoice_id: "business_data.invoice_number"
+        sub_flow_output:
+          verified_status: "payment_status"
+
+      - id: route_escalation
+        type: branch
+        arms:
+          - conditions:
+              - field: verified_status.paid
+                operator: eq
+                value: true
+            goto: already_resolved
+            description: Payment was actually made
+          - goto: genuine_escalation
+
+      - id: already_resolved
+        type: generate
+        system_prompt: "The escalation is about a payment that was already made. Apologize and confirm."
+        user_prompt: >
+          {{contact_name}} escalated about a payment, but our system shows it was received.
+          Apologize for the confusion and confirm the payment was processed.
+        next: resolve_action
+
+      - id: resolve_action
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: resolved
+          extra_data:
+            resolution: "Payment confirmed during escalation"
+
+      - id: genuine_escalation
+        type: generate
+        system_prompt: >
+          This is a genuine escalation. Be empathetic, acknowledge the issue,
+          and let them know a senior team member will handle this.
+        user_prompt: >
+          {{contact_name}} has escalated. Draft a message acknowledging their
+          concern and confirming that a senior team member will be in touch.
+        next: escalate_action
+
+      - id: escalate_action
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: escalation_assigned
+          extra_data:
+            assigned_to: senior_team
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  DEFAULT FALLBACK — Catch-all for unmatched contexts
+  # ═══════════════════════════════════════════════════════════
+
+  - id: default
+    name: Default Response
+    description: Fallback flow when no specific flow matches
+    tags:
+      - default
+    priority: -1
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        default: "there"
+
+    steps:
+      - id: generate_response
+        type: generate
+        system_prompt: >
+          You are a professional follow-up agent. The system couldn't find
+          a specific dialogue flow for this situation, so generate an
+          appropriate response based on the available context.
+          Be helpful, professional, and action-oriented.
+        user_prompt: >
+          Contact: {{contact_name}}
+          Latest message: {{user_message}}
+          Business context: {{business_context}}
+          
+          Generate an appropriate response.
+        constraints:
+          temperature: 0.7

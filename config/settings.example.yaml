@@ -1,0 +1,1047 @@
+# ConverseAgent Configuration
+# Copy to settings.yaml and fill in your values
+
+app_name: "ConverseAgent"
+debug: true
+secret_key: "your-secret-key-change-in-production"
+business_domain: "dealer_management"   # dealer_management | supply_chain | crm | hr | generic
+timezone: "Asia/Kolkata"
+
+# ——— LLM Configuration ————————————————————————————
+llm:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  temperature: 0.7
+  max_tokens: 1024
+  api_key: "${CONVERSE_LLM_API_KEY}"
+  system_prompt_template: |
+    You are a professional follow-up agent for {{business_domain}}.
+    You are contacting {{contact_name}} ({{contact_role}}) regarding: {{business_context}}.
+    {{state_context}}
+    
+    Previous conversation context:
+    {{conversation_history}}
+    
+    Follow-up reason: {{followup_reason}}
+    
+    Be professional, concise, and action-oriented.
+    Always reference specific details from the business context.
+    Be aware of the current business process state and adapt your approach.
+    If the contact has concerns, acknowledge them and provide solutions.
+
+# ——— Database ——————————————————————————————————————
+database:
+  url: "sqlite+aiosqlite:///./converse_agent.db"
+  redis_url: "redis://localhost:6379/0"
+
+# ——— Message Queue ————————————————————————————————
+# Outbound follow-ups are dispatched via a message queue
+# instead of a polling scheduler for lower latency and
+# better horizontal scaling.
+queue:
+  backend: "memory"                        # "memory" for dev, "redis" for production
+  redis_url: "redis://localhost:6379/1"    # separate DB from cache/storage
+  consumer_group: "followup-workers"       # Redis Streams consumer group name
+  consumer_concurrency: 5                  # max concurrent dispatches per worker
+  delayed_promote_interval: 5              # seconds between delayed-queue scans
+  retry_backoff_base: 60                   # base seconds for exponential retry
+
+# ——— Backend System Integration ————————————————————
+backend:
+  type: "rest"                              # rest | grpc | graphql | database
+  base_url: "https://your-erp.example.com/api/v1"
+  auth_type: "bearer"                       # bearer | api_key | basic | oauth2
+  auth_credentials:
+    token: "${BACKEND_API_TOKEN}"
+  
+  endpoints:
+    get_followups: "/followups/pending"
+    get_contact: "/contacts/{contact_id}"
+    get_context: "/followups/{followup_id}/context"
+    update_followup: "/followups/{followup_id}/status"
+    search_contacts: "/contacts/search"
+
+# ——— Channel Configuration ———————————————————————
+channels:
+  chat:
+    enabled: true
+    credentials:
+      websocket_path: "/ws/chat"
+      cors_origins:
+        - "http://localhost:3000"
+        - "https://yourdomain.com"
+
+  email:
+    enabled: true
+    credentials:
+      smtp_host: "smtp.gmail.com"
+      smtp_port: 587
+      smtp_user: "agent@yourdomain.com"
+      smtp_password: "${EMAIL_SMTP_PASSWORD}"
+      from_name: "Follow-Up Agent"
+      from_email: "agent@yourdomain.com"
+
+  whatsapp:
+    enabled: true
+    credentials:
+      api_url: "https://graph.facebook.com/v18.0"
+      phone_number_id: "${WHATSAPP_PHONE_ID}"
+      access_token: "${WHATSAPP_ACCESS_TOKEN}"
+      verify_token: "${WHATSAPP_VERIFY_TOKEN}"
+      webhook_path: "/webhooks/whatsapp"
+
+  voice:
+    enabled: true
+    credentials:
+      pipecat_ws_url: "ws://localhost:8765"
+      tts_provider: "elevenlabs"
+      tts_api_key: "${TTS_API_KEY}"
+      tts_voice_id: "default"
+      stt_provider: "deepgram"
+      stt_api_key: "${STT_API_KEY}"
+      telephony_provider: "twilio"
+      telephony_account_sid: "${TWILIO_SID}"
+      telephony_auth_token: "${TWILIO_AUTH}"
+      telephony_phone_number: "+1234567890"
+
+# ——— Follow-Up Rules ——————————————————————————————
+rules:
+  - id: "payment_reminder"
+    name: "Payment Reminder"
+    description: "Follow up on overdue payments"
+    trigger:
+      type: "schedule"
+      cron: "0 10 * * MON-FRI"
+    conditions:
+      - field: "payment_status"
+        operator: "eq"
+        value: "overdue"
+      - field: "days_overdue"
+        operator: "gte"
+        value: 3
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["whatsapp", "email", "voice"]
+        template: "payment_reminder"
+        process_type: "payment_collection"
+        entity_type: "invoice"
+        entity_id_field: "invoice_number"
+        escalation:
+          after_attempts: 3
+          escalate_to: "manager"
+          escalate_channel: "email"
+
+  - id: "order_confirmation"
+    name: "Order Confirmation Follow-Up"
+    trigger:
+      type: "event"
+      event_name: "order_placed"
+    conditions:
+      - field: "order_value"
+        operator: "gte"
+        value: 10000
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["whatsapp", "chat"]
+        template: "order_confirmation"
+        delay_minutes: 30
+        process_type: "order_fulfillment"
+        entity_type: "order"
+        entity_id_field: "order_id"
+
+  - id: "delivery_tracking"
+    name: "Delivery Status Update"
+    trigger:
+      type: "event"
+      event_name: "shipment_dispatched"
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["whatsapp", "email"]
+        template: "delivery_update"
+        process_type: "order_fulfillment"
+        entity_type: "shipment"
+        entity_id_field: "shipment_id"
+
+  - id: "feedback_collection"
+    name: "Post-Delivery Feedback"
+    trigger:
+      type: "event"
+      event_name: "delivery_completed"
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["whatsapp", "chat"]
+        template: "feedback_request"
+        delay_minutes: 1440
+        process_type: "feedback_collection"
+        entity_type: "order"
+        entity_id_field: "order_id"
+
+# ——— Business Process State Maps ——————————————————
+# Each state map defines a finite state machine for a business process.
+# Context changes (intents, events, timeouts) trigger transitions.
+# Transitions can declare actions (enqueue follow-ups, update backend, etc.)
+#
+# A single conversation can bind to MULTIPLE state maps simultaneously.
+# E.g. an order conversation can track both "payment_collection" and
+# "delivery_tracking" as parallel state machines.
+
+state_maps:
+  # ── Payment Collection ─────────────────────────────
+  # Tracks the lifecycle of collecting a payment from a contact.
+  - process_type: "payment_collection"
+    description: "Overdue payment follow-up and collection process"
+    states:
+      - pending          # Payment is overdue, no outreach yet
+      - reminded         # First outreach sent
+      - acknowledged     # Contact acknowledged the reminder
+      - promised         # Contact promised to pay by a date
+      - partial_paid     # Partial payment received
+      - confirmed        # Full payment confirmed
+      - overdue          # Promise broken, re-escalation needed
+      - escalated        # Escalated to manager / legal
+      - closed           # Process complete
+    initial_state: "pending"
+    terminal_states: ["confirmed", "closed"]
+
+    transitions:
+      # Outreach sent → reminded
+      - from_states: ["pending"]
+        to_state: "reminded"
+        trigger: { type: "action", value: "outreach_sent" }
+        description: "First reminder sent to contact"
+
+      # Contact acknowledges
+      - from_states: ["reminded"]
+        to_state: "acknowledged"
+        trigger:
+          type: "intent"
+          values: ["acknowledged", "understood", "will_check"]
+        description: "Contact acknowledged the payment reminder"
+        actions:
+          - type: "schedule_check"
+            delay_minutes: 2880          # Check again in 48h
+            metadata:
+              check_trigger_type: "timeout"
+              check_trigger_value: "no_payment_48h"
+
+      # Contact promises to pay
+      - from_states: ["reminded", "acknowledged"]
+        to_state: "promised"
+        trigger:
+          type: "intent"
+          values: ["payment_promised", "will_pay", "paying_soon"]
+        description: "Contact promised to make payment"
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "update_payment_status"
+            backend_payload: { status: "payment_promised" }
+          - type: "schedule_check"
+            delay_minutes: 4320          # Check again in 72h
+            metadata:
+              check_trigger_type: "timeout"
+              check_trigger_value: "promise_check"
+
+      # Promise broken — no payment received after timeout
+      - from_states: ["promised"]
+        to_state: "overdue"
+        trigger: { type: "timeout", value: "promise_check" }
+        description: "Payment promise deadline passed without payment"
+        actions:
+          - type: "enqueue_followup"
+            template: "payment_promise_broken"
+            channel_priority: ["whatsapp", "email", "voice"]
+            priority: "high"
+
+      # Payment confirmed (from any active state)
+      - from_states: ["reminded", "acknowledged", "promised", "partial_paid", "overdue"]
+        to_state: "confirmed"
+        trigger:
+          type: "intent"
+          values: ["payment_confirmed", "paid", "payment_done"]
+        description: "Contact confirms payment has been made"
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "mark_payment_received"
+            backend_payload: { status: "paid" }
+          - type: "resolve"
+
+      # Backend event: payment actually received
+      - from_states: ["reminded", "acknowledged", "promised", "partial_paid", "overdue"]
+        to_state: "confirmed"
+        trigger: { type: "event", value: "payment_received" }
+        description: "Backend confirmed payment received"
+        actions:
+          - type: "enqueue_followup"
+            template: "payment_thank_you"
+            channel_priority: ["whatsapp"]
+          - type: "resolve"
+
+      # Partial payment received
+      - from_states: ["reminded", "acknowledged", "promised", "overdue"]
+        to_state: "partial_paid"
+        trigger: { type: "event", value: "partial_payment_received" }
+        description: "Partial payment received from backend"
+        actions:
+          - type: "enqueue_followup"
+            template: "partial_payment_acknowledgement"
+            channel_priority: ["whatsapp", "email"]
+          - type: "schedule_check"
+            delay_minutes: 4320
+            metadata:
+              check_trigger_type: "timeout"
+              check_trigger_value: "remaining_payment_check"
+
+      # Escalation requested (from any non-terminal state)
+      - from_states: ["*"]
+        to_state: "escalated"
+        trigger:
+          type: "intent"
+          values: ["escalation_needed", "speak_to_manager", "dispute"]
+        description: "Contact requested escalation or disputed payment"
+        actions:
+          - type: "escalate"
+            metadata: { reason: "Contact requested escalation during payment collection" }
+          - type: "notify"
+            metadata:
+              target: "finance_manager"
+              message: "Payment escalation required"
+
+      # Max attempts exhausted (from any non-terminal state)
+      - from_states: ["*"]
+        to_state: "escalated"
+        trigger: { type: "timeout", value: "max_attempts_reached" }
+        description: "All outreach attempts exhausted"
+        actions:
+          - type: "escalate"
+            metadata: { reason: "Maximum follow-up attempts reached" }
+          - type: "notify"
+            metadata:
+              target: "finance_manager"
+              message: "Payment follow-up exhausted all attempts"
+
+  # ── Order Fulfillment ──────────────────────────────
+  # Tracks an order from placement through delivery confirmation.
+  - process_type: "order_fulfillment"
+    description: "Order lifecycle from placement to delivery confirmation"
+    states:
+      - placed
+      - confirmed
+      - processing
+      - shipped
+      - delivered
+      - issue_reported
+      - resolved
+      - cancelled
+    initial_state: "placed"
+    terminal_states: ["resolved", "cancelled"]
+
+    transitions:
+      - from_states: ["placed"]
+        to_state: "confirmed"
+        trigger: { type: "action", value: "outreach_sent" }
+        description: "Order confirmation sent to contact"
+
+      - from_states: ["confirmed"]
+        to_state: "confirmed"
+        trigger:
+          type: "intent"
+          values: ["acknowledged", "order_accepted"]
+        description: "Contact acknowledged order"
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "confirm_order"
+
+      - from_states: ["placed", "confirmed"]
+        to_state: "processing"
+        trigger: { type: "event", value: "order_processing" }
+
+      - from_states: ["processing", "confirmed"]
+        to_state: "shipped"
+        trigger: { type: "event", value: "shipment_dispatched" }
+        actions:
+          - type: "enqueue_followup"
+            template: "delivery_update"
+            channel_priority: ["whatsapp", "email"]
+
+      - from_states: ["shipped"]
+        to_state: "delivered"
+        trigger: { type: "event", value: "delivery_completed" }
+        actions:
+          - type: "enqueue_followup"
+            template: "feedback_request"
+            delay_minutes: 1440
+            channel_priority: ["whatsapp"]
+
+      - from_states: ["delivered"]
+        to_state: "resolved"
+        trigger:
+          type: "intent"
+          values: ["satisfied", "resolved", "all_good"]
+        actions:
+          - type: "resolve"
+
+      - from_states: ["confirmed", "shipped", "delivered"]
+        to_state: "issue_reported"
+        trigger:
+          type: "intent"
+          values: ["issue", "problem", "damaged", "wrong_item", "complaint"]
+        actions:
+          - type: "escalate"
+            metadata: { reason: "Customer reported issue with order" }
+          - type: "notify"
+            metadata: { target: "operations_team" }
+
+      - from_states: ["issue_reported"]
+        to_state: "resolved"
+        trigger:
+          type: "intent"
+          values: ["resolved", "satisfied", "issue_fixed"]
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "close_issue"
+          - type: "resolve"
+
+      - from_states: ["placed", "confirmed"]
+        to_state: "cancelled"
+        trigger:
+          type: "intent"
+          values: ["cancel_order", "cancelled"]
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "cancel_order"
+          - type: "resolve"
+
+  # ── Feedback Collection ────────────────────────────
+  # Simple 3-state process for post-interaction feedback.
+  - process_type: "feedback_collection"
+    description: "Collect and process feedback after service delivery"
+    states:
+      - requested
+      - received
+      - processed
+    initial_state: "requested"
+    terminal_states: ["processed"]
+
+    transitions:
+      - from_states: ["requested"]
+        to_state: "received"
+        trigger:
+          type: "intent"
+          values: ["feedback_given", "rating_provided", "review"]
+        actions:
+          - type: "update_backend"
+            backend_endpoint: "store_feedback"
+
+      - from_states: ["received"]
+        to_state: "processed"
+        trigger: { type: "action", value: "feedback_processed" }
+        actions:
+          - type: "enqueue_followup"
+            template: "feedback_thank_you"
+            channel_priority: ["whatsapp"]
+          - type: "resolve"
+
+      # Negative feedback triggers escalation
+      - from_states: ["requested"]
+        to_state: "received"
+        trigger:
+          type: "intent"
+          values: ["complaint", "unhappy", "bad_experience"]
+        actions:
+          - type: "escalate"
+            metadata: { reason: "Negative feedback received" }
+          - type: "notify"
+            metadata: { target: "customer_success" }
+
+# ══════════════════════════════════════════════════════════════
+#  DIALOGUE FLOWS — Agentic conversation templates
+# ══════════════════════════════════════════════════════════════
+#
+# Each flow is an executable plan, not static text. The executor
+# walks through steps making real-time decisions at each node.
+#
+# Step types:
+#   gate:      Check conditions before proceeding
+#   tool_call: Call backend/built-in tools, store result for later
+#   branch:    Route to different paths based on context
+#   generate:  LLM generates content with structured prompts
+#   message:   Static text with {{variable}} interpolation
+#   action:    Fire state machine transitions / side effects
+#   collect:   Wait for user input with expected intents
+# ──────────────────────────────────────────────────────────────
+
+dialogue_flows:
+
+  # ──────────────────────────────────────────────────────
+  #  Payment Reminder — Adaptive escalation flow
+  # ──────────────────────────────────────────────────────
+  - id: payment_reminder
+    name: "Payment Reminder (Adaptive)"
+    description: "Escalating payment reminder that adapts tone based on overdue days, attempt count, and prior conversation history"
+    tags: ["process:payment_collection", "state:pending", "state:reminded", "state:overdue"]
+    priority: 10
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+        default: "there"
+      - name: amount
+        source: business_context.amount
+        format: currency
+        default: "the outstanding amount"
+      - name: invoice_number
+        source: business_context.invoice_number
+        default: "your invoice"
+      - name: days_overdue
+        source: business_context.days_overdue
+        default: 0
+      - name: due_date
+        source: business_context.due_date
+        format: date
+        default: ""
+      - name: organization
+        source: contact.organization
+        default: ""
+
+    default_channel_config:
+      whatsapp:
+        tone: concise
+        max_length: 1000
+      email:
+        tone: formal
+        max_length: 2000
+      voice:
+        tone: conversational
+        max_length: 300
+      sms:
+        tone: concise
+        max_length: 160
+
+    steps:
+      # 1. Check if we should even be reaching out right now
+      - id: check_hours
+        type: tool_call
+        description: "Check if it's appropriate to contact now"
+        tool:
+          endpoint: "$check_business_hours"
+          result_key: business_hours
+
+      - id: hours_gate
+        type: gate
+        description: "Only proceed during business hours"
+        conditions:
+          - field: business_hours.is_business_hours
+            operator: eq
+            value: true
+        fail_goto: off_hours_message
+
+      # 2. Check real-time payment status (maybe they already paid)
+      - id: check_payment
+        type: tool_call
+        description: "Check current payment status from backend"
+        tool:
+          endpoint: check_payment_status
+          payload_template:
+            invoice_id: "business_context.invoice_number"
+            contact_id: "contact.external_id"
+          result_key: payment_status
+
+      # 3. Branch based on real-time payment status
+      - id: payment_branch
+        type: branch
+        description: "Route based on current payment status"
+        arms:
+          - conditions:
+              - field: payment_status.status
+                operator: eq
+                value: "paid"
+            goto: already_paid
+            description: "Payment already received"
+          - conditions:
+              - field: payment_status.status
+                operator: eq
+                value: "partial"
+            goto: partial_payment
+            description: "Partial payment detected"
+          - goto: determine_urgency
+            description: "Still unpaid"
+
+      # 3a. They already paid — thank them
+      - id: already_paid
+        type: generate
+        system_prompt: |
+          You are a professional accounts representative for {{organization}}.
+          The contact {{contact_name}} has ALREADY PAID invoice {{invoice_number}}.
+          Generate a brief, warm thank-you message. Do not ask for payment.
+          If there was a recent conversation, acknowledge the resolution.
+        user_prompt: |
+          Contact: {{contact_name}}
+          Invoice: {{invoice_number}} ({{amount}})
+          Payment confirmed in backend system.
+          Conversation history: {{conversation_history}}
+        next: emit_paid_action
+
+      - id: emit_paid_action
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: event
+          trigger_value: payment_received
+          extra_data:
+            source: dialogue_flow
+            detected_via: tool_call
+
+      # 3b. Partial payment
+      - id: partial_payment
+        type: generate
+        system_prompt: |
+          You are a professional accounts representative for {{organization}}.
+          {{contact_name}} has made a PARTIAL payment on invoice {{invoice_number}}.
+          Acknowledge the partial payment warmly, state the remaining balance,
+          and ask when they expect to complete payment.
+        user_prompt: |
+          Invoice: {{invoice_number}}, Total: {{amount}}
+          Partial amount paid: {{payment_status.amount_paid}}
+          Remaining: {{payment_status.remaining}}
+          Contact: {{contact_name}}
+        constraints:
+          temperature: 0.6
+
+      # 4. Determine urgency tier for unpaid invoices
+      - id: determine_urgency
+        type: tool_call
+        tool:
+          endpoint: "$get_attempt_summary"
+          result_key: attempt_info
+
+      - id: urgency_branch
+        type: branch
+        description: "Route by escalation level"
+        arms:
+          - conditions:
+              - field: attempt_info.is_first_attempt
+                operator: eq
+                value: true
+            goto: gentle_reminder
+            description: "First outreach — gentle"
+          - conditions:
+              - field: days_overdue
+                operator: lte
+                value: 7
+            goto: standard_reminder
+            description: "Mildly overdue"
+          - conditions:
+              - field: days_overdue
+                operator: lte
+                value: 14
+            goto: firm_reminder
+            description: "Significantly overdue"
+          - goto: final_notice
+            description: "Severely overdue"
+
+      # 4a. First contact — warm and helpful
+      - id: gentle_reminder
+        type: generate
+        system_prompt: |
+          You are a helpful accounts representative for {{organization}}.
+          This is the FIRST TIME you are reaching out to {{contact_name}}
+          about invoice {{invoice_number}}. Be warm, professional, and
+          non-confrontational. Assume they may simply have forgotten.
+          Offer to help if they have questions.
+        user_prompt: |
+          Invoice: {{invoice_number}}, Amount: {{amount}}, Due: {{due_date}}
+          Days overdue: {{days_overdue}}
+          Contact: {{contact_name}} at {{organization}}
+          Previous conversation: {{conversation_history}}
+        constraints:
+          temperature: 0.7
+        next: sign_off
+
+      # 4b. Follow-up reminder — professional
+      - id: standard_reminder
+        type: generate
+        system_prompt: |
+          You are a professional accounts representative for {{organization}}.
+          This is a follow-up reminder for {{contact_name}}. They have been
+          contacted before about this invoice. Be polite but clear that
+          payment is expected. Reference any prior commitments.
+        user_prompt: |
+          Invoice: {{invoice_number}}, Amount: {{amount}}, Due: {{due_date}}
+          Days overdue: {{days_overdue}}
+          Attempts so far: {{attempt_info.attempt_count}}
+          Contact: {{contact_name}}
+          Previous conversation: {{conversation_history}}
+        constraints:
+          temperature: 0.5
+        next: sign_off
+
+      # 4c. Firm reminder — serious
+      - id: firm_reminder
+        type: generate
+        system_prompt: |
+          You are a senior accounts representative for {{organization}}.
+          Invoice {{invoice_number}} is significantly overdue ({{days_overdue}} days).
+          Be direct and firm but professional. Mention consequences of continued
+          non-payment (account hold, service impact). Ask for immediate resolution.
+          If they previously promised to pay, reference that broken commitment.
+        user_prompt: |
+          Invoice: {{invoice_number}}, Amount: {{amount}}, Due: {{due_date}}
+          Days overdue: {{days_overdue}}, Attempts: {{attempt_info.attempt_count}}
+          Contact: {{contact_name}} at {{organization}}
+          Previous conversation: {{conversation_history}}
+        constraints:
+          temperature: 0.3
+        next: sign_off
+
+      # 4d. Final notice
+      - id: final_notice
+        type: message
+        content: |
+          Dear {{contact_name}},
+
+          This is a final notice regarding invoice {{invoice_number}} for {{amount}}, which is now {{days_overdue}} days overdue.
+
+          Despite our previous communications, this invoice remains unpaid. Please arrange payment immediately to avoid further action on your account.
+
+          If you have already made this payment, please share the transaction reference so we can update our records.
+        next: sign_off
+
+      # 5. Sign-off (channel-aware)
+      - id: sign_off
+        type: message
+        content: ""
+        channel_variants:
+          - channel: email
+            content_override: "\n\nBest regards,\nAccounts Team"
+          - channel: whatsapp
+            content_override: "\nReply here if you have any questions. 🙏"
+          - channel: voice
+            skip: true
+
+      # Off-hours fallback (gates can redirect here)
+      - id: off_hours_message
+        type: message
+        content: ""
+        channel_variants:
+          - channel: whatsapp
+            content_override: "Hi {{contact_name}}, we'll follow up with you during business hours regarding invoice {{invoice_number}}. Thank you!"
+          - channel: email
+            content_override: "Dear {{contact_name}},\n\nWe will be reaching out during business hours regarding invoice {{invoice_number}} ({{amount}}).\n\nBest regards,\nAccounts Team"
+
+  # ──────────────────────────────────────────────────────
+  #  Payment Thank You — Post-payment confirmation
+  # ──────────────────────────────────────────────────────
+  - id: payment_thank_you
+    name: "Payment Thank You"
+    description: "Sent after payment is confirmed"
+    tags: ["process:payment_collection", "state:confirmed"]
+    priority: 5
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+      - name: amount
+        source: business_context.amount
+        format: currency
+      - name: invoice_number
+        source: business_context.invoice_number
+
+    steps:
+      - id: thank_you
+        type: generate
+        system_prompt: |
+          Generate a brief, warm thank-you message for {{contact_name}}.
+          Payment for {{invoice_number}} ({{amount}}) has been received.
+          Keep it short and professional. Mention that their records are updated.
+        user_prompt: "Thank {{contact_name}} for paying {{amount}} on {{invoice_number}}."
+        constraints:
+          temperature: 0.7
+          max_tokens: 150
+
+  # ──────────────────────────────────────────────────────
+  #  Order Confirmation — Intelligent order flow
+  # ──────────────────────────────────────────────────────
+  - id: order_confirmation
+    name: "Order Confirmation (Intelligent)"
+    description: "Confirms order, checks stock, adapts message based on availability"
+    tags: ["process:order_fulfillment", "state:placed", "state:confirmed"]
+    priority: 10
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+      - name: order_id
+        source: business_context.order_id
+      - name: order_value
+        source: business_context.order_value
+        format: currency
+      - name: items
+        source: business_context.items
+      - name: expected_delivery
+        source: business_context.expected_delivery
+        format: date
+
+    steps:
+      # Check stock availability in real-time
+      - id: check_stock
+        type: tool_call
+        tool:
+          endpoint: check_stock_availability
+          payload_template:
+            order_id: "business_context.order_id"
+          result_key: stock_status
+
+      - id: stock_branch
+        type: branch
+        arms:
+          - conditions:
+              - field: stock_status.all_available
+                operator: eq
+                value: true
+            goto: full_confirmation
+          - conditions:
+              - field: stock_status.partial_available
+                operator: eq
+                value: true
+            goto: partial_confirmation
+          - goto: backorder_notice
+
+      - id: full_confirmation
+        type: generate
+        system_prompt: |
+          Confirm order {{order_id}} for {{contact_name}}. All items are in stock.
+          Mention the order value, expected delivery date, and items ordered.
+          Be enthusiastic and professional.
+        user_prompt: |
+          Order: {{order_id}}, Value: {{order_value}}
+          Items: {{items}}
+          Delivery: {{expected_delivery}}
+          All items available and ready to ship.
+
+      - id: partial_confirmation
+        type: generate
+        system_prompt: |
+          Order {{order_id}} has PARTIAL stock availability for {{contact_name}}.
+          Confirm what IS available and mention the items on backorder.
+          Offer options: wait for full shipment, or ship what's available now.
+          Be helpful and transparent.
+        user_prompt: |
+          Order: {{order_id}}, Value: {{order_value}}
+          Available items: {{stock_status.available_items}}
+          Backordered items: {{stock_status.backordered_items}}
+          Contact: {{contact_name}}
+        constraints:
+          temperature: 0.5
+
+      - id: backorder_notice
+        type: generate
+        system_prompt: |
+          Order {{order_id}} is currently on BACKORDER for {{contact_name}}.
+          Apologize professionally. Give an estimated restock date if available.
+          Offer alternatives or the option to cancel.
+        user_prompt: |
+          Order: {{order_id}}, Contact: {{contact_name}}
+          Estimated restock: {{stock_status.restock_date}}
+          Reason: {{stock_status.reason}}
+        constraints:
+          temperature: 0.4
+
+  # ──────────────────────────────────────────────────────
+  #  Delivery Update — Status-aware notification
+  # ──────────────────────────────────────────────────────
+  - id: delivery_update
+    name: "Delivery Update"
+    description: "Checks shipment tracking and generates contextual update"
+    tags: ["process:order_fulfillment", "state:shipped"]
+    priority: 5
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+      - name: order_id
+        source: business_context.order_id
+      - name: shipment_id
+        source: business_context.shipment_id
+
+    steps:
+      - id: track_shipment
+        type: tool_call
+        tool:
+          endpoint: track_shipment
+          payload_template:
+            shipment_id: "business_context.shipment_id"
+          result_key: tracking
+
+      - id: tracking_branch
+        type: branch
+        arms:
+          - conditions:
+              - field: tracking.status
+                operator: eq
+                value: delivered
+            goto: delivered_msg
+          - conditions:
+              - field: tracking.status
+                operator: eq
+                value: delayed
+            goto: delayed_msg
+          - goto: in_transit_msg
+
+      - id: in_transit_msg
+        type: generate
+        system_prompt: |
+          Generate a shipping update for {{contact_name}}'s order {{order_id}}.
+          Include tracking info and estimated delivery.
+        user_prompt: |
+          Shipment {{shipment_id}} is in transit.
+          Current location: {{tracking.current_location}}
+          ETA: {{tracking.eta}}
+
+      - id: delayed_msg
+        type: generate
+        system_prompt: |
+          Shipment for {{contact_name}}'s order {{order_id}} is DELAYED.
+          Apologize, explain the delay, and give a revised estimate.
+          Be empathetic and proactive.
+        user_prompt: |
+          Shipment {{shipment_id}} delayed.
+          Reason: {{tracking.delay_reason}}
+          Revised ETA: {{tracking.revised_eta}}
+        constraints:
+          temperature: 0.4
+
+      - id: delivered_msg
+        type: generate
+        system_prompt: |
+          Confirm delivery of {{contact_name}}'s order {{order_id}}.
+          Ask if everything looks good and invite feedback.
+        user_prompt: |
+          Order {{order_id}} delivered on {{tracking.delivered_at}}.
+          Delivered to: {{tracking.delivered_to}}
+        next: request_feedback
+
+      - id: request_feedback
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: event
+          trigger_value: delivery_confirmed
+
+  # ──────────────────────────────────────────────────────
+  #  Feedback Request — Contextual satisfaction check
+  # ──────────────────────────────────────────────────────
+  - id: feedback_request
+    name: "Feedback Request"
+    description: "Requests feedback with awareness of order history and any issues"
+    tags: ["process:feedback_collection", "state:requested"]
+    priority: 5
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+      - name: order_id
+        source: business_context.order_id
+      - name: interaction_type
+        source: business_context.type
+        default: "recent interaction"
+
+    steps:
+      # Check if there were any issues with this order
+      - id: check_issues
+        type: tool_call
+        tool:
+          endpoint: get_order_issues
+          payload_template:
+            order_id: "business_context.order_id"
+            contact_id: "contact.external_id"
+          result_key: issue_check
+
+      - id: issue_branch
+        type: branch
+        arms:
+          - conditions:
+              - field: issue_check.had_issues
+                operator: eq
+                value: true
+            goto: post_issue_feedback
+          - goto: standard_feedback
+
+      - id: post_issue_feedback
+        type: generate
+        system_prompt: |
+          {{contact_name}} had issues with order {{order_id}} that were resolved.
+          Request feedback sensitively — acknowledge the issue, ask if the
+          resolution was satisfactory, and if there's anything else needed.
+          Do NOT sound like a generic survey.
+        user_prompt: |
+          Contact: {{contact_name}}
+          Issue: {{issue_check.issue_summary}}
+          Resolution: {{issue_check.resolution}}
+          Ask for their feedback on the resolution.
+        constraints:
+          temperature: 0.6
+
+      - id: standard_feedback
+        type: generate
+        system_prompt: |
+          Request feedback from {{contact_name}} about their {{interaction_type}}.
+          Be brief, personal, and genuine — not survey-like.
+          Ask one specific question rather than a generic "how was everything?".
+        user_prompt: |
+          Contact: {{contact_name}}
+          Order: {{order_id}}
+          Interaction type: {{interaction_type}}
+          Conversation history: {{conversation_history}}
+        constraints:
+          temperature: 0.7
+          max_tokens: 200
+
+  # ──────────────────────────────────────────────────────
+  #  Inbound Response — Handles customer replies
+  # ──────────────────────────────────────────────────────
+  - id: inbound_response
+    name: "Inbound Response Handler"
+    description: "Generates contextual response to customer messages based on current business state"
+    tags: ["inbound", "response"]
+    priority: 1
+
+    variables:
+      - name: contact_name
+        source: contact.name
+        format: capitalize
+      - name: current_state
+        source: state_bindings.0.current_state
+        default: ""
+      - name: process_type
+        source: state_bindings.0.process_type
+        default: ""
+
+    steps:
+      # Use a single LLM call with rich context — the state bindings
+      # and conversation history give the model everything it needs
+      - id: contextual_response
+        type: generate
+        system_prompt: |
+          You are a professional business agent. Respond to {{contact_name}}'s
+          latest message in the context of the ongoing business process.
+
+          Current business state: {{process_type}} → {{current_state}}
+          Your response should be appropriate for this state:
+          - If they confirmed payment → thank them warmly
+          - If they have a question → answer helpfully
+          - If they promised action → acknowledge and note the timeline
+          - If they're upset → empathize and offer escalation
+          - If they need clarification → explain clearly
+
+          Always be professional, concise, and drive toward resolution.
+        user_prompt: |
+          Business context: {{business_context}}
+          State bindings: {{state_bindings}}
+          Conversation history: {{conversation_history}}
+          Latest message: {{user_message}}
+

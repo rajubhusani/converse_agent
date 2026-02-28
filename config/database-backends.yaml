@@ -1,0 +1,100 @@
+# ══════════════════════════════════════════════════════════════
+#  ConverseAgent — Database & Store Backend Configuration Guide
+#
+#  This file shows all supported database + store combinations.
+#  Copy the section you need into your config/settings.yaml.
+# ══════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 1: PostgreSQL + SQL Store (recommended for production)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   url: "postgresql://converse:${POSTGRES_PASSWORD}@postgres:5432/converse_agent"
+#   store_backend: "sql"
+#
+# queue:
+#   backend: "redis"
+#   redis_url: "redis://redis:6379"
+#
+# Docker: docker-compose.prod.yml (default)
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 2: MySQL + SQL Store
+# ──────────────────────────────────────────────────────────────
+# database:
+#   url: "mysql://converse:${MYSQL_PASSWORD}@mysql:3306/converse_agent"
+#   store_backend: "sql"
+#
+# queue:
+#   backend: "redis"
+#   redis_url: "redis://redis:6379"
+#
+# Docker: docker-compose.mysql.yml
+# Requires: MySQL 8.0+ (for native JSON column support)
+# Note:     aiomysql driver is included in requirements.txt
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 3: SQLite + SQL Store (single-node, no server needed)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   url: "sqlite:///./data/converse_agent.db"
+#   store_backend: "sql"
+#
+# queue:
+#   backend: "memory"
+#
+# Docker: docker-compose.lite.yml
+# Note:   Single-process only. Good for < 50 concurrent calls.
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 4: In-Memory Store (zero dependencies)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   store_backend: "memory"
+#
+# queue:
+#   backend: "memory"
+#
+# Docker: docker-compose.lite.yml
+# Note:   All data lost on restart. Best for development/testing.
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 5: File Store (JSON files, survives restarts)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   store_backend: "file"
+#   store_file_dir: "./data"
+#
+# queue:
+#   backend: "memory"
+#
+# Docker: docker-compose.lite.yml
+# Note:   Single-process. Good for demos, edge devices, < 20 calls/day.
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 6: PostgreSQL + Redis (full production, horizontal scale)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   url: "postgresql://converse:${POSTGRES_PASSWORD}@postgres:5432/converse_agent"
+#   store_backend: "sql"
+#
+# queue:
+#   backend: "redis"
+#   redis_url: "redis://redis:6379"
+#   consumer_concurrency: 10
+#
+# Docker: docker-compose.prod.yml
+# Note:   Supports multiple worker replicas via Redis consumer groups.
+
+# ──────────────────────────────────────────────────────────────
+#  OPTION 7: MySQL + In-Memory Queue (no Redis needed)
+# ──────────────────────────────────────────────────────────────
+# database:
+#   url: "mysql://converse:${MYSQL_PASSWORD}@mysql:3306/converse_agent"
+#   store_backend: "sql"
+#
+# queue:
+#   backend: "memory"
+#
+# Docker: docker-compose.mysql.yml (remove redis service)
+# Note:   Single worker process. Good for < 100 calls/day.

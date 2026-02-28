@@ -1,0 +1,49 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+*.egg-info
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Documentation (not needed in image)
+docs/
+*.md
+!README.md
+
+# Tests (not needed in production image)
+tests/
+conftest.py
+
+# Scripts (mounted separately or run outside container)
+scripts/
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Nginx (runs separately)
+nginx/
+
+# Data volumes
+*.db
+*.sqlite
+
+# Build artifacts
+converse-agent/

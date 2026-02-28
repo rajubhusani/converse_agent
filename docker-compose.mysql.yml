@@ -1,0 +1,153 @@
+# ══════════════════════════════════════════════════════════════
+#  ConverseAgent — MySQL Production Stack
+#
+#  Usage:
+#    docker compose -f docker-compose.mysql.yml up -d
+#
+#  Switch from PostgreSQL:
+#    1. Update .env:  DATABASE_URL=mysql://converse:${MYSQL_PASSWORD}@mysql:3306/converse_agent
+#    2. Update settings.yaml:  database.url: ${DATABASE_URL}
+#    3. docker compose -f docker-compose.mysql.yml up -d
+#
+#  NOTE: Requires MySQL 8.0+ for native JSON column support.
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ── API Service ────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Worker Service ─────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    command: python -m job_queue.consumer
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ── Voice Service ──────────────────────────────────────────
+  voice:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8765:8765"
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10100:10000-10100/udp"
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - SIP_DOMAIN=${SIP_DOMAIN:-localhost}
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+    command: python -m voice.server
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── MySQL 8.0 ──────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: converse_agent
+      MYSQL_USER: converse
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-dev_mysql_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max-connections=200
+      - --innodb-buffer-pool-size=256M
+      - --innodb-log-file-size=64M
+      - --innodb-flush-log-at-trx-commit=2
+      - --slow-query-log=1
+      - --slow-query-log-file=/var/lib/mysql/slow.log
+      - --long-query-time=2
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "converse", "-p${MYSQL_PASSWORD:-dev_mysql_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+volumes:
+  mysql_data:

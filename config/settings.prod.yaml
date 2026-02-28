@@ -1,0 +1,192 @@
+# ──────────────────────────────────────────────────────────────
+#  ConverseAgent — Production Settings
+#
+#  Phone Agent Stack:
+#    Telephony: Exotel  |  STT: Deepgram Nova-2
+#    TTS: Cartesia Sonic  |  Voice LLM: OpenAI (gpt-4-turbo)
+#    Text LLM: Claude Sonnet  |  Queue: Cloud Redis
+#    Database: In-memory (no PostgreSQL)
+# ──────────────────────────────────────────────────────────────
+
+app_name: ConverseAgent
+debug: false
+secret_key: "${SECRET_KEY}"
+business_domain: dealer_management
+timezone: "Asia/Kolkata"
+
+# ── LLM ──────────────────────────────────────────────────────
+llm:
+  provider: anthropic
+  model: "claude-sonnet-4-5-20250929"       # Text channels use Sonnet
+  temperature: 0.7
+  max_tokens: 1024
+  api_key: "${ANTHROPIC_API_KEY}"
+
+# ── Database ─────────────────────────────────────────────────
+# No PostgreSQL — using in-memory store with Redis queue
+# Data does not persist across restarts; Redis handles job queue
+database:
+  url: "sqlite+aiosqlite:///./converse_agent.db"
+  store_backend: "memory"           # "sql" | "memory" | "file"
+  store_file_dir: "./data"
+  redis_url: "${REDIS_URL}"
+
+# ── Queue ────────────────────────────────────────────────────
+# backend: "redis" (production) | "memory" (development)
+queue:
+  backend: redis                    # "redis" | "memory"
+  redis_url: "${REDIS_URL}"
+  consumer_group: "followup-workers"
+  consumer_concurrency: 5
+  delayed_promote_interval: 5
+
+# ── Backend ──────────────────────────────────────────────────
+backend:
+  type: rest
+  base_url: "${BACKEND_BASE_URL}"
+  auth_type: bearer
+  auth_credentials:
+    token: "${BACKEND_AUTH_TOKEN}"
+
+# ── Channels ─────────────────────────────────────────────────
+channels:
+  chat:
+    enabled: true
+
+  whatsapp:
+    enabled: true
+    credentials:
+      phone_number_id: "${WHATSAPP_PHONE_NUMBER_ID}"
+      access_token: "${WHATSAPP_ACCESS_TOKEN}"
+      verify_token: "${WHATSAPP_VERIFY_TOKEN}"
+      webhook_path: "/webhooks/whatsapp"
+
+  email:
+    enabled: true
+    credentials:
+      smtp_host: "${SMTP_HOST}"
+      smtp_port: "${SMTP_PORT}"
+      smtp_user: "${SMTP_USERNAME}"
+      smtp_password: "${SMTP_PASSWORD}"
+      from_address: "${EMAIL_FROM}"
+
+  voice:
+    enabled: true
+    credentials:
+      # ── Pipecat Pipeline ──────────────────────────────
+      pipecat_ws_url: "ws://voice:8765"
+
+      # ── Telephony (Exotel — India, ~60% cheaper) ──────
+      telephony_provider: "exotel"
+      telephony_account_sid: "${EXOTEL_ACCOUNT_SID}"
+      telephony_api_key: "${EXOTEL_API_KEY}"
+      telephony_auth_token: "${EXOTEL_API_TOKEN}"
+      telephony_phone_number: "${EXOTEL_CALLER_ID}"
+      telephony_subdomain: "${EXOTEL_SUBDOMAIN}"
+      telephony_status_callback_url: "${BASE_URL}/webhooks/exotel/status"
+
+      # ── SIP Bridge ────────────────────────────────────
+      base_url: "${BASE_URL}"
+      sip_domain: "${SIP_DOMAIN}"
+
+      # ── STT (Deepgram Nova-2) ─────────────────────────
+      stt_provider: "deepgram"
+      stt_api_key: "${DEEPGRAM_API_KEY}"
+      stt_model: "nova-2"
+
+      # ── TTS (Cartesia Sonic — sub-100ms TTFB) ─────────
+      tts_provider: "cartesia"
+      tts_api_key: "${CARTESIA_API_KEY}"
+      tts_voice_id: "a0e99841-438c-4a64-b679-ae501e7d6091"
+      tts_model: "sonic-english"
+
+      # ── LLM (OpenAI for voice) ────────────────────────
+      llm_provider: "openai"
+      llm_api_key: "${OPENAI_API_KEY}"
+      llm_model: "${OPENAI_MODEL}"
+      prompt_caching: false
+
+      # ── Quality Preset ────────────────────────────────
+      quality_preset: "cost_optimized"
+
+      # ── Call Settings ─────────────────────────────────
+      max_concurrent_calls: 20
+      max_call_duration_s: 300
+      silence_timeout_ms: 15000
+      ring_timeout_s: 30
+      recording_enabled: false
+
+# ── Rules ────────────────────────────────────────────────────
+rules:
+  - id: "dealer_order_followup"
+    name: "Dealer Order Follow-Up"
+    description: "Follow up with dealers after order delivery"
+    trigger:
+      type: "schedule"
+      cron: "0 10 * * MON-SAT"
+    conditions:
+      - field: "order_status"
+        operator: "eq"
+        value: "delivered"
+      - field: "days_since_delivery"
+        operator: "gte"
+        value: 2
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["voice", "whatsapp"]
+        template: "dealer_order_followup"
+        process_type: "dealer_management"
+
+  - id: "dealer_payment_collection"
+    name: "Dealer Payment Collection"
+    description: "Follow up on overdue dealer payments"
+    trigger:
+      type: "schedule"
+      cron: "0 11 * * MON-FRI"
+    conditions:
+      - field: "payment_status"
+        operator: "eq"
+        value: "overdue"
+      - field: "days_overdue"
+        operator: "gte"
+        value: 3
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["voice", "whatsapp", "email"]
+        template: "dealer_payment_collection"
+        process_type: "dealer_payment"
+        escalation:
+          after_attempts: 3
+          escalate_to: "area_manager"
+          escalate_channel: "email"
+
+  - id: "dealer_new_product"
+    name: "New Product Introduction"
+    description: "Introduce new products to relevant dealers"
+    trigger:
+      type: "event"
+      event: "product_launched"
+    conditions:
+      - field: "dealer_category"
+        operator: "in"
+        value: ["platinum", "gold"]
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["voice"]
+        template: "dealer_new_product_intro"
+        process_type: "dealer_sales"
+
+  - id: "dealer_complaint_followup"
+    name: "Complaint Resolution Follow-Up"
+    trigger:
+      type: "event"
+      event: "complaint_registered"
+    conditions:
+      - field: "complaint_priority"
+        operator: "in"
+        value: ["high", "critical"]
+    actions:
+      - type: "start_conversation"
+        channel_priority: ["voice"]
+        template: "dealer_complaint_resolution"
+        process_type: "dealer_support"

@@ -1,0 +1,56 @@
+# ══════════════════════════════════════════════════════════════
+#  ConverseAgent — Lightweight Stack (No Database, No Redis)
+#
+#  Uses in-memory or file-based storage + in-memory job queue.
+#  Best for: demos, testing, single-user deployments, edge devices.
+#
+#  Usage:
+#    docker compose -f docker-compose.lite.yml up -d
+#
+#  For file-based persistence (survives restarts):
+#    Set in settings.yaml:
+#      database:
+#        store_backend: "file"
+#        store_file_dir: "/app/data"
+#      queue:
+#        backend: "memory"
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ── Single combined API + Worker service ───────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10100:10000-10100/udp"
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - SIP_DOMAIN=${SIP_DOMAIN:-localhost}
+    volumes:
+      - ./config:/app/config:ro
+      - app_data:/app/data       # Persistent file store
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  app_data:

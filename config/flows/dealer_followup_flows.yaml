@@ -1,0 +1,1082 @@
+# ──────────────────────────────────────────────────────────────
+#  Dealer Follow-Up Dialogue Flows
+#
+#  Voice-first conversation flows for dealer/distributor
+#  relationship management: order follow-ups, payment collection,
+#  new product introductions, complaint resolution, and
+#  quarterly business reviews.
+#
+#  Designed for Indian market — supports Hindi/English code-switching,
+#  Indian currency formatting, and relationship-first communication.
+# ──────────────────────────────────────────────────────────────
+
+flows:
+
+  # ═══════════════════════════════════════════════════════════
+  #  1. DEALER ORDER FOLLOW-UP
+  # ═══════════════════════════════════════════════════════════
+
+  - id: dealer_order_followup
+    name: Dealer Order Follow-Up
+    description: >
+      Follow up with dealer on recent order — confirm delivery,
+      check satisfaction, identify reorder opportunity.
+    version: "1.0"
+    tags:
+      - "process:dealer_management"
+      - "state:order_delivered"
+      - "state:order_pending"
+    priority: 10
+    objective: "Confirm order status, resolve issues, identify reorder opportunity"
+    composable: true
+    success_criteria:
+      - "Dealer confirms order received or issue is identified"
+      - "Next action is clear — reorder, complaint, or satisfaction logged"
+
+    variables:
+      - name: dealer_name
+        source: contact.name
+        default: "Sir"
+      - name: dealer_firm
+        source: contact.organization
+        default: ""
+      - name: order_id
+        source: business_data.order_id
+        required: true
+      - name: order_amount
+        source: business_data.order_amount
+        format: currency
+      - name: order_date
+        source: business_data.order_date
+        format: date
+      - name: delivery_date
+        source: business_data.delivery_date
+        format: date
+      - name: product_name
+        source: business_data.product_name
+        default: "your order"
+      - name: territory
+        source: business_data.territory
+        default: ""
+      - name: relationship_age
+        source: business_data.relationship_months
+        default: ""
+
+    default_channel_config:
+      voice:
+        tone: warm_professional
+        max_length: 200
+      whatsapp:
+        tone: concise
+        max_length: 600
+
+    on_enter:
+      - type: remember
+        key: followup_started
+        value: "dealer_order at {{_timestamp}}"
+        scope: conversation
+      - type: log
+        message: "Starting dealer order followup for {{dealer_name}}, order {{order_id}}"
+
+    steps:
+      - id: check_hours
+        type: gate
+        description: Only call during business hours (9 AM - 7 PM IST)
+        conditions:
+          - field: _skip_hours_check
+            operator: eq
+            value: true
+        fail_goto: check_hours_tool
+
+      - id: check_hours_tool
+        type: tool_call
+        tool:
+          endpoint: "$check_business_hours"
+          result_key: hours_info
+        next: hours_gate
+
+      - id: hours_gate
+        type: gate
+        conditions:
+          - field: hours_info.is_business_hours
+            operator: eq
+            value: true
+        fail_goto: schedule_retry
+
+      # Greeting — warm, relationship-aware
+      - id: greeting
+        type: generate
+        description: Open with warm dealer greeting
+        system_prompt: >
+          You are a relationship manager calling a valued dealer/distributor.
+          This is a business relationship, not a cold call. Be warm and respectful.
+          Indian business culture values personal connection — ask about them briefly
+          before getting to business. Use "ji" suffix if appropriate.
+          
+          CRITICAL: You are on a LIVE PHONE CALL. Keep greeting to 2-3 sentences max.
+          Don't read out order numbers digit by digit — say "your recent order" first.
+        user_prompt: >
+          Dealer: {{dealer_name}} {{dealer_firm}}
+          Territory: {{territory}}
+          Relationship: {{relationship_age}} months
+          Order: {{order_id}} placed on {{order_date}}
+          Product: {{product_name}}
+          Expected delivery: {{delivery_date}}
+          
+          Generate a warm opening greeting. Ask how they're doing, then transition
+          to checking on their recent order of {{product_name}}.
+        constraints:
+          max_tokens: 150
+          temperature: 0.7
+        next: collect_delivery_status
+
+      # Collect: Did they receive the order?
+      - id: collect_delivery_status
+        type: collect
+        description: Check if order was received
+        expected_intents:
+          - received_yes          # "Haan mil gaya" / "Yes, received"
+          - received_partial      # "Kuch items missing hain"
+          - not_received          # "Abhi tak nahi aaya"
+          - quality_issue         # "Quality mein problem hai"
+          - wrong_items           # "Galat items aaye hain"
+          - general_positive      # "Sab theek hai"
+        entity_extraction:
+          - delivery_date_actual
+          - missing_items
+          - damage_description
+        timeout_seconds: 15
+        timeout_goto: prompt_delivery
+
+      - id: prompt_delivery
+        type: generate
+        description: Gently prompt for delivery confirmation
+        system_prompt: >
+          The dealer hasn't responded to your delivery question. 
+          Ask again naturally — maybe they were distracted.
+          Keep it brief, one sentence.
+        user_prompt: >
+          Ask {{dealer_name}} if they received the {{product_name}} order.
+        constraints:
+          max_tokens: 60
+        next: collect_delivery_retry
+
+      - id: collect_delivery_retry
+        type: collect
+        expected_intents:
+          - received_yes
+          - received_partial
+          - not_received
+          - quality_issue
+        timeout_seconds: 10
+        timeout_goto: route_delivery
+
+      # Route based on delivery status
+      - id: route_delivery
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: in
+                value: ["received_yes", "general_positive"]
+            goto: satisfaction_check
+            description: Order received — check satisfaction
+          - conditions:
+              - field: _last_intent
+                operator: in
+                value: ["not_received"]
+            goto: handle_not_received
+            description: Order not received — escalate
+          - conditions:
+              - field: _last_intent
+                operator: in
+                value: ["received_partial", "quality_issue", "wrong_items"]
+            goto: handle_issue
+            description: Issue with order — resolve
+          - goto: satisfaction_check
+            description: Default — assume received
+
+      # Happy path: received, check satisfaction
+      - id: satisfaction_check
+        type: generate
+        system_prompt: >
+          Great news — the dealer received their order. Now check satisfaction
+          and gently explore reorder opportunity. Don't be pushy.
+          Use phrases like "How is the stock moving?" or "Need anything else?"
+        user_prompt: >
+          {{dealer_name}} confirmed receiving {{product_name}}.
+          Amount: {{order_amount}}
+          
+          Express happiness, briefly ask about stock movement/demand,
+          and ask if they need anything else. Two sentences max.
+        constraints:
+          max_tokens: 100
+        next: collect_reorder_interest
+
+      - id: collect_reorder_interest
+        type: collect
+        expected_intents:
+          - reorder_yes         # "Haan, ek aur order dena hai"
+          - reorder_later       # "Abhi nahi, baad mein"
+          - reorder_specific    # "50 pieces chahiye"
+          - no_need             # "Abhi stock hai"
+          - complaint           # "Ek problem hai actually..."
+        entity_extraction:
+          - quantity
+          - product_name
+          - timeline
+        timeout_seconds: 15
+        timeout_goto: wrap_up_positive
+
+      # Handle reorder interest
+      - id: route_reorder
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: in
+                value: ["reorder_yes", "reorder_specific"]
+            goto: capture_reorder
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "complaint"
+            goto: handle_issue
+          - goto: wrap_up_positive
+
+      - id: capture_reorder
+        type: generate
+        system_prompt: >
+          The dealer wants to reorder. Confirm what they need and
+          let them know you'll process it. Be enthusiastic but efficient.
+        user_prompt: >
+          {{dealer_name}} wants to reorder.
+          Extracted: quantity={{_entities.quantity}}, product={{_entities.product_name}}
+          
+          Confirm the reorder details and tell them you'll get it processed today.
+        constraints:
+          max_tokens: 100
+        next: log_reorder
+
+      - id: log_reorder
+        type: remember
+        remember_key: "reorder_request"
+        remember_value: "{{dealer_name}} requested reorder: qty={{_entities.quantity}} on {{_timestamp}}"
+        remember_scope: conversation
+        next: wrap_up_positive
+
+      # Issue path
+      - id: handle_not_received
+        type: generate
+        system_prompt: >
+          The dealer hasn't received their order. Be empathetic and take ownership.
+          Promise to check with logistics and call back within 2 hours.
+          Don't make excuses. Indian dealers value accountability.
+        user_prompt: >
+          {{dealer_name}} has NOT received order {{order_id}}.
+          Order date: {{order_date}}, expected delivery: {{delivery_date}}.
+          
+          Apologize, take ownership, promise to check with logistics
+          and call back within 2 hours with an update.
+        constraints:
+          max_tokens: 120
+        next: log_escalation
+
+      - id: handle_issue
+        type: generate
+        system_prompt: >
+          The dealer has an issue with their order (partial delivery, quality, wrong items).
+          Listen carefully, acknowledge the problem, and commit to resolution.
+          Ask them to describe the specific issue briefly.
+        user_prompt: >
+          {{dealer_name}} reported an issue with order {{order_id}}.
+          Intent detected: {{_last_intent}}
+          Details: {{_entities.damage_description}}
+          
+          Acknowledge the issue empathetically and ask for specific details
+          so you can resolve it. Keep to 2 sentences.
+        constraints:
+          max_tokens: 100
+        next: collect_issue_details
+
+      - id: collect_issue_details
+        type: collect
+        expected_intents:
+          - description_given
+          - wants_replacement
+          - wants_refund
+          - wants_credit
+        entity_extraction:
+          - issue_description
+          - affected_quantity
+          - preferred_resolution
+        timeout_seconds: 20
+        timeout_goto: log_escalation
+
+      - id: log_escalation
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: escalate_to_operations
+        next: wrap_up_issue
+
+      - id: wrap_up_issue
+        type: generate
+        system_prompt: >
+          Wrap up the call about the order issue. Commit to a specific
+          timeline for resolution. Be confident and reassuring.
+        user_prompt: >
+          Summarize what you'll do for {{dealer_name}} regarding the issue.
+          Promise a callback within 2 hours with resolution.
+          Thank them for their patience.
+        constraints:
+          max_tokens: 80
+        next: farewell
+
+      # Positive wrap-up
+      - id: wrap_up_positive
+        type: generate
+        system_prompt: >
+          Wrap up a positive dealer call. Thank them for their business.
+          Mention you're always available. Keep it warm and brief.
+          End with a culturally appropriate goodbye.
+        user_prompt: >
+          Wrap up positively with {{dealer_name}}.
+          If reorder was requested, confirm it's being processed.
+          Thank them and say goodbye warmly.
+        constraints:
+          max_tokens: 60
+        next: farewell
+
+      - id: farewell
+        type: message
+        content: ""
+        channel_variants:
+          - channel: voice
+            skip: true  # LLM already generated the goodbye
+
+      - id: schedule_retry
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: delay_for_business_hours
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  2. DEALER PAYMENT COLLECTION
+  # ═══════════════════════════════════════════════════════════
+
+  - id: dealer_payment_collection
+    name: Dealer Payment Collection
+    description: >
+      Follow up on outstanding dealer payment. Tone escalates with
+      attempt count: friendly → firm → final notice.
+    version: "1.0"
+    tags:
+      - "process:dealer_payment"
+      - "state:payment_due"
+      - "state:payment_overdue"
+    priority: 15
+    objective: "Collect outstanding payment or secure firm commitment date"
+    composable: true
+
+    variables:
+      - name: dealer_name
+        source: contact.name
+        default: "Sir"
+      - name: dealer_firm
+        source: contact.organization
+        default: ""
+      - name: invoice_number
+        source: business_data.invoice_number
+        required: true
+      - name: amount
+        source: business_data.amount
+        format: currency
+        required: true
+      - name: due_date
+        source: business_data.due_date
+        format: date
+      - name: days_overdue
+        source: business_data.days_overdue
+        default: 0
+      - name: credit_limit
+        source: business_data.credit_limit
+        format: currency
+      - name: outstanding_total
+        source: business_data.outstanding_total
+        format: currency
+
+    steps:
+      - id: gather_data
+        type: parallel
+        parallel_tools:
+          - endpoint: "$get_attempt_summary"
+            result_key: attempt_info
+          - endpoint: "$get_payment_history"
+            result_key: payment_history
+        next: route_by_urgency
+
+      - id: route_by_urgency
+        type: branch
+        arms:
+          - conditions:
+              - field: days_overdue
+                operator: lte
+                value: 7
+            goto: gentle_reminder
+          - conditions:
+              - field: days_overdue
+                operator: lte
+                value: 30
+            goto: firm_reminder
+          - conditions:
+              - field: attempt_info.attempt_count
+                operator: gte
+                value: 3
+            goto: final_notice
+          - goto: firm_reminder
+
+      # Gentle: 0-7 days overdue
+      - id: gentle_reminder
+        type: generate
+        system_prompt: >
+          You're calling a dealer about a payment that's slightly overdue.
+          This is a valued business relationship — be warm and assume good intent.
+          Don't say "overdue" — say "pending" or "due". Frame it as a routine check.
+          
+          Indian dealers often pay on relationship terms. Be flexible about
+          dates but get a commitment. Say amounts in lakhs/thousands naturally.
+        user_prompt: >
+          Dealer: {{dealer_name}} from {{dealer_firm}}
+          Invoice: {{invoice_number}}, Amount: {{amount}}
+          Due: {{due_date}} ({{days_overdue}} days ago)
+          Payment history: {{payment_history.summary}}
+          
+          Call about the pending payment. Be warm, mention it casually,
+          and ask when they can process it. "Payment kaafi time se pending
+          hai" type phrasing — gentle, not accusatory.
+        constraints:
+          max_tokens: 150
+          temperature: 0.7
+        next: collect_payment_response
+
+      # Firm: 8-30 days overdue
+      - id: firm_reminder
+        type: generate
+        system_prompt: >
+          Payment is overdue 1-4 weeks. Be professional but clear.
+          Mention the specific amount and that it's affecting their credit.
+          Still respectful — this is a business relationship you want to keep.
+          If their credit limit is being impacted, mention it factually.
+        user_prompt: >
+          Dealer: {{dealer_name}} from {{dealer_firm}}
+          Invoice: {{invoice_number}}, Amount: {{amount}}
+          Days overdue: {{days_overdue}}
+          Credit limit: {{credit_limit}}, Total outstanding: {{outstanding_total}}
+          Attempt #{{attempt_info.attempt_count}}
+          
+          Be clear this payment needs attention. If outstanding exceeds
+          credit limit, mention new orders may be held. Get a date commitment.
+        constraints:
+          max_tokens: 150
+          temperature: 0.5
+        next: collect_payment_response
+
+      # Final: 30+ days or 3+ attempts
+      - id: final_notice
+        type: generate
+        system_prompt: >
+          This is a final notice call. Payment is significantly overdue
+          or multiple attempts have been made. Be direct but professional.
+          Mention account review and supply impact. Don't threaten — state
+          consequences factually. Still offer to work with them on a plan.
+        user_prompt: >
+          Dealer: {{dealer_name}} from {{dealer_firm}}
+          Invoice: {{invoice_number}}, Amount: {{amount}}
+          Days overdue: {{days_overdue}}
+          Attempt #{{attempt_info.attempt_count}} — FINAL ATTEMPTS
+          Outstanding total: {{outstanding_total}}
+          
+          This is a final notice. Mention account review, supply hold risk.
+          Offer a payment plan if full payment isn't possible. Get a commitment.
+        constraints:
+          max_tokens: 180
+          temperature: 0.3
+        next: collect_payment_response
+
+      - id: collect_payment_response
+        type: collect
+        expected_intents:
+          - will_pay_now          # "Aaj hi kar deta hoon"
+          - will_pay_date         # "Friday tak ho jayega"
+          - partial_payment       # "Aadha abhi, baaki next week"
+          - dispute               # "Invoice galat hai" / "Ye amount sahi nahi"
+          - financial_difficulty   # "Cash flow tight hai" / "Business slow"
+          - already_paid          # "Payment ho gaya hai"
+          - need_time             # "Thoda time chahiye"
+        entity_extraction:
+          - payment_date
+          - partial_amount
+          - dispute_reason
+        timeout_seconds: 15
+        timeout_goto: prompt_commitment
+
+      - id: prompt_commitment
+        type: generate
+        system_prompt: >
+          The dealer hasn't committed to a payment date. Ask directly
+          but respectfully. "Kab tak possible hoga?" or similar.
+        user_prompt: >
+          Ask {{dealer_name}} for a specific date they can make the payment
+          of {{amount}} for invoice {{invoice_number}}.
+        constraints:
+          max_tokens: 60
+        next: collect_payment_retry
+
+      - id: collect_payment_retry
+        type: collect
+        expected_intents:
+          - will_pay_date
+          - need_time
+          - financial_difficulty
+        entity_extraction:
+          - payment_date
+        timeout_seconds: 10
+        timeout_goto: wrap_up_payment
+
+      - id: wrap_up_payment
+        type: generate
+        system_prompt: >
+          Wrap up the payment call. If they committed to a date, confirm it.
+          If they have difficulties, note that you'll discuss options internally.
+          If dispute, note you'll check and revert. Always end professionally.
+        user_prompt: >
+          Last intent: {{_last_intent}}
+          Payment date: {{_entities.payment_date}}
+          Dispute reason: {{_entities.dispute_reason}}
+          
+          Wrap up with {{dealer_name}}. Confirm next steps based on their response.
+        constraints:
+          max_tokens: 100
+        next: record_outcome
+
+      - id: record_outcome
+        type: remember
+        remember_key: "payment_followup_{{invoice_number}}"
+        remember_value: "{{_last_intent}} — date: {{_entities.payment_date}} — attempt #{{attempt_info.attempt_count}}"
+        remember_scope: conversation
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  3. NEW PRODUCT INTRODUCTION TO DEALER
+  # ═══════════════════════════════════════════════════════════
+
+  - id: dealer_new_product_intro
+    name: New Product Introduction
+    description: >
+      Introduce a new product/SKU to existing dealer. Gauge interest,
+      explain margins, take initial order if interested.
+    version: "1.0"
+    tags:
+      - "process:dealer_sales"
+      - "state:new_product_launch"
+    priority: 8
+    objective: "Generate dealer interest in new product and capture initial order"
+
+    variables:
+      - name: dealer_name
+        source: contact.name
+        default: "Sir"
+      - name: dealer_firm
+        source: contact.organization
+      - name: product_name
+        source: business_data.product_name
+        required: true
+      - name: product_category
+        source: business_data.product_category
+      - name: mrp
+        source: business_data.mrp
+        format: currency
+      - name: dealer_price
+        source: business_data.dealer_price
+        format: currency
+      - name: margin_percent
+        source: business_data.margin_percent
+      - name: min_order_qty
+        source: business_data.min_order_qty
+        default: "1 case"
+      - name: launch_offer
+        source: business_data.launch_offer
+        default: ""
+      - name: competing_product
+        source: business_data.competing_product
+        default: ""
+
+    steps:
+      - id: intro_greeting
+        type: generate
+        system_prompt: >
+          You're calling an existing dealer to introduce a new product.
+          This is an exciting call — you have something valuable to share.
+          Start with a brief personal check-in, then say you have
+          "kuch naya share karna tha" (something new to share).
+          
+          IMPORTANT: Don't launch into a product pitch immediately.
+          Build curiosity first. Ask if they have 2 minutes.
+        user_prompt: >
+          Dealer: {{dealer_name}} from {{dealer_firm}}
+          New product: {{product_name}} in {{product_category}}
+          
+          Greet warmly, check-in briefly, then say you have an exciting
+          new product to tell them about. Ask if they have 2 minutes.
+        constraints:
+          max_tokens: 100
+        next: collect_availability
+
+      - id: collect_availability
+        type: collect
+        expected_intents:
+          - available_yes       # "Haan bolo" / "Tell me"
+          - available_busy      # "Abhi busy hoon" / "Call later"
+          - curious             # "Kya hai?" / "What is it?"
+        timeout_seconds: 8
+        timeout_goto: product_pitch
+
+      - id: route_availability
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "available_busy"
+            goto: schedule_callback
+          - goto: product_pitch
+
+      - id: product_pitch
+        type: generate
+        system_prompt: >
+          Now pitch the product. Key selling points for dealers:
+          1. MARGIN — always lead with margin. Dealers care about margin.
+          2. Demand — is there market demand? Competing products?
+          3. Launch offer — any special introductory pricing?
+          4. Minimum order — keep barrier low for trial.
+          
+          Say amounts in natural Indian format (₹ in lakhs, margins in %).
+          Keep it conversational — don't read a spec sheet.
+          
+          IMPORTANT: After sharing 2-3 key points, PAUSE and ask their reaction.
+          Don't monologue the entire product info.
+        user_prompt: >
+          Product: {{product_name}}
+          Category: {{product_category}}
+          MRP: {{mrp}}, Dealer price: {{dealer_price}}
+          Margin: {{margin_percent}}%
+          Min order: {{min_order_qty}}
+          Launch offer: {{launch_offer}}
+          Competing with: {{competing_product}}
+          
+          Present the product focusing on margin and demand. Keep to 3-4 sentences.
+          End by asking their initial reaction.
+        constraints:
+          max_tokens: 180
+        next: collect_interest
+
+      - id: collect_interest
+        type: collect
+        expected_intents:
+          - interested          # "Interesting hai" / "Send details"
+          - want_to_order       # "Order karna hai"
+          - need_more_info      # "Aur batao" / "Sample bhejo"
+          - not_interested      # "Humari line nahi hai"
+          - price_concern       # "Price zyada hai" / "Margin kam hai"
+          - will_think          # "Sochte hain" / "Let me think"
+        entity_extraction:
+          - quantity
+          - objection_reason
+        timeout_seconds: 15
+        timeout_goto: soft_close
+
+      - id: route_interest
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: in
+                value: ["interested", "want_to_order"]
+            goto: capture_order
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "price_concern"
+            goto: handle_price_objection
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "not_interested"
+            goto: graceful_exit
+          - goto: soft_close
+
+      - id: handle_price_objection
+        type: generate
+        system_prompt: >
+          The dealer raised a price concern. Address it by:
+          1. Comparing margin to competing products
+          2. Mentioning the launch offer if available
+          3. Suggesting a trial order at minimum quantity
+          Don't argue — acknowledge and redirect to value.
+        user_prompt: >
+          {{dealer_name}} has a price concern about {{product_name}}.
+          Dealer price: {{dealer_price}}, Margin: {{margin_percent}}%
+          Competing product: {{competing_product}}
+          Launch offer: {{launch_offer}}
+          
+          Address the concern, highlight value, suggest trial order.
+        constraints:
+          max_tokens: 120
+        next: collect_after_objection
+
+      - id: collect_after_objection
+        type: collect
+        expected_intents:
+          - convinced
+          - want_to_order
+          - still_not_interested
+          - will_think
+        timeout_seconds: 10
+        timeout_goto: soft_close
+
+      - id: capture_order
+        type: generate
+        system_prompt: >
+          The dealer wants to order! Confirm quantity and process.
+          If no quantity specified, suggest the minimum order quantity.
+          Be enthusiastic but efficient. Confirm delivery timeline.
+        user_prompt: >
+          {{dealer_name}} wants to order {{product_name}}.
+          Quantity mentioned: {{_entities.quantity}}
+          Min order: {{min_order_qty}}
+          
+          Confirm the order and delivery timeline. If no quantity,
+          suggest starting with {{min_order_qty}}.
+        constraints:
+          max_tokens: 100
+        next: log_order
+
+      - id: log_order
+        type: remember
+        remember_key: "new_product_order"
+        remember_value: "{{dealer_name}} ordered {{product_name}}: qty={{_entities.quantity}} on {{_timestamp}}"
+        remember_scope: conversation
+        next: wrap_up_sale
+
+      - id: soft_close
+        type: generate
+        system_prompt: >
+          Dealer is on the fence. Don't push. Offer to send a sample
+          or WhatsApp the details. Keep the door open.
+        user_prompt: >
+          {{dealer_name}} is undecided on {{product_name}}.
+          Offer to send product details on WhatsApp and a sample.
+        constraints:
+          max_tokens: 80
+        next: wrap_up_pending
+
+      - id: graceful_exit
+        type: generate
+        system_prompt: >
+          Dealer isn't interested. That's okay. Thank them, respect
+          their decision, and say you'll keep them updated on new launches
+          that might be more relevant. Stay positive — this is a long-term relationship.
+        user_prompt: >
+          {{dealer_name}} isn't interested in {{product_name}}.
+          Thank them and leave the door open for future products.
+        constraints:
+          max_tokens: 60
+        next: farewell
+
+      - id: wrap_up_sale
+        type: generate
+        system_prompt: Confirm the order is being processed and say an enthusiastic goodbye.
+        user_prompt: Thank {{dealer_name}} for the order and say goodbye warmly.
+        constraints:
+          max_tokens: 50
+        next: farewell
+
+      - id: wrap_up_pending
+        type: generate
+        system_prompt: Say you'll send details on WhatsApp and check back in a few days.
+        user_prompt: Tell {{dealer_name}} you'll WhatsApp the product details and follow up.
+        constraints:
+          max_tokens: 50
+        next: farewell
+
+      - id: farewell
+        type: message
+        content: ""
+
+      - id: schedule_callback
+        type: action
+        action_type: context_change
+        action_config:
+          trigger_type: action
+          trigger_value: schedule_callback_2h
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  4. DEALER COMPLAINT RESOLUTION
+  # ═══════════════════════════════════════════════════════════
+
+  - id: dealer_complaint_resolution
+    name: Dealer Complaint Resolution
+    description: >
+      Proactively call dealer to resolve a complaint that was
+      registered. Show accountability, gather details, commit to timeline.
+    version: "1.0"
+    tags:
+      - "process:dealer_support"
+      - "state:complaint_open"
+    priority: 20
+    objective: "Resolve dealer complaint with clear timeline and ownership"
+
+    variables:
+      - name: dealer_name
+        source: contact.name
+      - name: complaint_id
+        source: business_data.complaint_id
+        required: true
+      - name: complaint_type
+        source: business_data.complaint_type
+      - name: complaint_summary
+        source: business_data.complaint_summary
+      - name: complaint_date
+        source: business_data.complaint_date
+        format: date
+      - name: affected_order
+        source: business_data.affected_order_id
+
+    steps:
+      - id: empathy_open
+        type: generate
+        system_prompt: >
+          You're calling a dealer about their complaint. Lead with empathy
+          and accountability. DON'T say "I'm calling about your complaint" —
+          say something like "I wanted to personally follow up about the issue
+          you raised regarding..." 
+          
+          Show you've already looked into it. Indian business culture values
+          personal attention to problems.
+        user_prompt: >
+          Dealer: {{dealer_name}}
+          Complaint: {{complaint_id}} — {{complaint_type}}
+          Summary: {{complaint_summary}}
+          Date filed: {{complaint_date}}
+          Related order: {{affected_order}}
+          
+          Open with empathy. Show you know the details. Ask if the
+          situation has changed since they reported it.
+        constraints:
+          max_tokens: 150
+        next: collect_current_status
+
+      - id: collect_current_status
+        type: collect
+        expected_intents:
+          - still_unresolved      # Problem persists
+          - partially_resolved    # Some improvement
+          - resolved_itself       # Issue cleared up
+          - escalate_anger        # Very frustrated
+          - new_details           # Additional info to share
+        entity_extraction:
+          - current_status
+          - additional_details
+        timeout_seconds: 20
+        timeout_goto: resolution_commit
+
+      - id: route_complaint
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "resolved_itself"
+            goto: confirm_resolution
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "escalate_anger"
+            goto: handle_escalation
+          - goto: resolution_commit
+
+      - id: resolution_commit
+        type: generate
+        system_prompt: >
+          Commit to a specific resolution and timeline. Be concrete:
+          "We'll send a replacement by Thursday" not "We'll look into it."
+          Take personal ownership: "I'll make sure this gets done."
+          
+          If you need to involve other teams, say so but still own the outcome.
+        user_prompt: >
+          Complaint: {{complaint_type}} — {{complaint_summary}}
+          Current status: {{_last_intent}}
+          Additional: {{_entities.additional_details}}
+          
+          Commit to a specific resolution with a date.
+          Take personal ownership of the outcome.
+        constraints:
+          max_tokens: 120
+        next: wrap_up_complaint
+
+      - id: handle_escalation
+        type: generate
+        system_prompt: >
+          The dealer is very upset. Don't defend or make excuses.
+          Acknowledge their frustration directly. Offer to connect them
+          with a manager if they want, or commit to manager-level attention.
+          "Main samajh sakta hoon aapki frustration" type phrasing.
+        user_prompt: >
+          {{dealer_name}} is very frustrated about {{complaint_type}}.
+          Acknowledge, empathize, and offer manager involvement.
+        constraints:
+          max_tokens: 100
+        next: wrap_up_complaint
+
+      - id: confirm_resolution
+        type: generate
+        system_prompt: >
+          The issue resolved itself. Confirm, thank them for their patience,
+          and ask if there's anything else. Mark complaint as resolved.
+        user_prompt: >
+          {{dealer_name}}'s complaint {{complaint_id}} seems resolved.
+          Confirm and close positively.
+        constraints:
+          max_tokens: 60
+        next: wrap_up_complaint
+
+      - id: wrap_up_complaint
+        type: remember
+        remember_key: "complaint_followup_{{complaint_id}}"
+        remember_value: "Status: {{_last_intent}}, Resolution committed: {{_timestamp}}"
+        remember_scope: conversation
+
+
+  # ═══════════════════════════════════════════════════════════
+  #  5. QUARTERLY BUSINESS REVIEW CALL
+  # ═══════════════════════════════════════════════════════════
+
+  - id: dealer_qbr_call
+    name: Quarterly Business Review
+    description: >
+      Scheduled QBR call with dealer — review performance, discuss
+      targets, share market insights, strengthen relationship.
+    version: "1.0"
+    tags:
+      - "process:dealer_management"
+      - "state:qbr_scheduled"
+    priority: 5
+    objective: "Conduct productive QBR and align on next quarter targets"
+
+    variables:
+      - name: dealer_name
+        source: contact.name
+      - name: dealer_firm
+        source: contact.organization
+      - name: quarter
+        source: business_data.quarter
+      - name: quarterly_target
+        source: business_data.quarterly_target
+        format: currency
+      - name: quarterly_achieved
+        source: business_data.quarterly_achieved
+        format: currency
+      - name: achievement_percent
+        source: business_data.achievement_percent
+      - name: top_skus
+        source: business_data.top_skus
+      - name: growth_vs_last_quarter
+        source: business_data.growth_percent
+      - name: market_update
+        source: business_data.market_update
+
+    steps:
+      - id: qbr_opening
+        type: generate
+        system_prompt: >
+          Opening a QBR call with a dealer. Set a positive, collaborative tone.
+          This is a partnership review, not a performance review.
+          Start with appreciation, then frame the call: "Thought we'd quickly
+          review how {{quarter}} went and plan ahead."
+          
+          If achievement is >90%, lead with congratulations.
+          If <70%, acknowledge challenges but stay forward-looking.
+        user_prompt: >
+          Dealer: {{dealer_name}} from {{dealer_firm}}
+          Quarter: {{quarter}}
+          Target: {{quarterly_target}}, Achieved: {{quarterly_achieved}} ({{achievement_percent}}%)
+          Growth: {{growth_vs_last_quarter}}% vs last quarter
+          
+          Open the QBR call with appropriate tone based on performance.
+        constraints:
+          max_tokens: 150
+        next: collect_dealer_perspective
+
+      - id: collect_dealer_perspective
+        type: collect
+        description: Let the dealer share their perspective on the quarter
+        expected_intents:
+          - positive_feedback
+          - market_challenges
+          - supply_issues
+          - competition_pressure
+          - growth_opportunities
+          - operational_feedback
+        timeout_seconds: 30
+        timeout_goto: share_insights
+
+      - id: share_insights
+        type: generate
+        system_prompt: >
+          Share market insights and discuss opportunities for next quarter.
+          Reference their top-selling SKUs. Be data-informed but conversational.
+          End this section with a question about their targets/expectations.
+        user_prompt: >
+          Dealer perspective: {{_last_intent}}
+          Top SKUs: {{top_skus}}
+          Market update: {{market_update}}
+          
+          Share relevant market insights, highlight their top performers,
+          and ask about their expectations for next quarter.
+        constraints:
+          max_tokens: 180
+        next: collect_next_quarter
+
+      - id: collect_next_quarter
+        type: collect
+        expected_intents:
+          - optimistic
+          - concerned
+          - wants_support
+          - wants_new_products
+          - target_too_high
+        entity_extraction:
+          - expected_growth
+          - support_needed
+        timeout_seconds: 20
+        timeout_goto: qbr_wrap_up
+
+      - id: qbr_wrap_up
+        type: generate
+        system_prompt: >
+          Wrap up the QBR. Summarize key points, confirm aligned targets,
+          and mention any support you'll provide. End with strong
+          partnership language. Keep it brief — they're busy.
+        user_prompt: >
+          Wrap up QBR with {{dealer_name}}.
+          Their perspective: {{_last_intent}}
+          Support needed: {{_entities.support_needed}}
+          
+          Summarize, align on next steps, end warmly.
+        constraints:
+          max_tokens: 120

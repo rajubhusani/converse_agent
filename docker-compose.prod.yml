@@ -1,0 +1,172 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────
+#  Production Docker Compose — Exotel Phone Agent Stack
+#
+#  No local PostgreSQL — uses in-memory store + Cloud Redis queue.
+#  Telephony: Exotel | STT: Deepgram | TTS: Cartesia | LLM: OpenAI
+#
+#  Usage:
+#    cp .env.prod.example .env  # fill in credentials
+#    docker compose -f docker-compose.prod.yml up -d
+# ──────────────────────────────────────────────────────────────
+
+services:
+  # ── API Service ────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.prod.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    command: >
+      uvicorn api.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 2
+      --timeout-keep-alive 120
+      --access-log
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Worker Service (follow-up dispatch) ─────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.prod.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    command: python -m job_queue.consumer
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ── Voice Service (Pipecat pipeline manager) ────────────────
+  voice:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8765:8765"                         # WebSocket
+      - "5060:5060/udp"                     # SIP signaling
+      - "5060:5060/tcp"                     # SIP signaling (TCP)
+      - "10000-10100:10000-10100/udp"       # RTP media
+    env_file: .env
+    environment:
+      - CONVERSE_CONFIG=/app/config/settings.prod.yaml
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PUBLIC_IP=${PUBLIC_IP}
+      - SIP_DOMAIN=${SIP_DOMAIN:-voice.example.com}
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    command: python -m voice.server
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # ──────────────────────────────────────────────────────────
+  #  NOTE: No local Redis or PostgreSQL containers.
+  #
+  #  - Redis: Using Cloud Redis (REDIS_URL in .env)
+  #  - Database: Using in-memory store (store_backend: "memory")
+  #
+  #  To add local Redis back, uncomment the service below
+  #  and remove REDIS_URL from .env (or point it to localhost).
+  # ──────────────────────────────────────────────────────────
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "127.0.0.1:6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   command: >
+  #     redis-server
+  #     --maxmemory 256mb
+  #     --maxmemory-policy allkeys-lru
+  #     --appendonly yes
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  #  To add PostgreSQL back later:
+  #  1. Uncomment the postgres service below
+  #  2. In settings.prod.yaml, set database.store_backend: "sql"
+  #  3. Set DATABASE_URL in .env
+  #  4. Add depends_on to app and worker services
+  # ──────────────────────────────────────────────────────────
+  # postgres:
+  #   image: postgres:16-alpine
+  #   ports:
+  #     - "127.0.0.1:5432:5432"
+  #   environment:
+  #     POSTGRES_DB: converse_agent
+  #     POSTGRES_USER: converse
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U converse -d converse_agent"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
+
+# volumes:
+#   redis_data:
+#   pg_data:
