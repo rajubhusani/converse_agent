@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────
+#  Spare Care Support Team — Customer Data
+#
+#  Per-phone-number data for outbound calls. The outbound API
+#  auto-looks up customer data by the "to" phone number.
+#
+#  Format:
+#    flow_id: which dialog flow to use
+#    customers: phone → variable dict
+#    defaults: fallback values when phone not found
+# ──────────────────────────────────────────────────────────────
+
+flow_id: spare_care_support
+
+customers:
+
+  "+919966990732":
+    seller_name: "Rajesh Kumar"
+    part_names: "Brake Pad Set, Oil Filter"
+    part_quantity: 5
+    request_date: "15th February 2026"
+    order_id: "SC-2026-0451"
+    order_value: "45,000"
+    pending_order_count: 3
+
+  "+919876543210":
+    seller_name: "Priya Sharma"
+    part_names: "Air Filter, Spark Plug Set"
+    part_quantity: 10
+    request_date: "20th February 2026"
+    order_id: "SC-2026-0467"
+    order_value: "72,000"
+    pending_order_count: 2
+
+  "+918765432109":
+    seller_name: "Mohammed Irfan"
+    part_names: "Clutch Plate"
+    part_quantity: 3
+    request_date: "22nd February 2026"
+    order_id: "SC-2026-0489"
+    order_value: "28,000"
+    pending_order_count: 1
+
+defaults:
+  seller_name: "Sir/Madam"
+  part_names: "your requested parts"
+  part_quantity: ""
+  request_date: ""
+  order_id: ""
+  order_value: ""
+  pending_order_count: ""

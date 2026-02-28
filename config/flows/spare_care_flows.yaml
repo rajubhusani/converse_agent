@@ -1,0 +1,557 @@
+# ──────────────────────────────────────────────────────────────
+#  Spare Care Support Team — Part Request Follow-Up Flow
+#
+#  Outbound voice call to sellers/dealers regarding pending
+#  part requests. Verifies identity, states purpose, confirms
+#  eligibility, guides through portal, and handles 40+ user
+#  response scenarios across 10 categories.
+#
+#  Designed for Indian market — supports Hindi/English code-switching,
+#  natural conversational tone, and relationship-first communication.
+# ──────────────────────────────────────────────────────────────
+
+flows:
+
+  - id: spare_care_support
+    name: Spare Care Support Team — Part Request Follow-Up
+    description: >
+      Outbound call to sellers regarding pending part requests raised
+      by SpareCare. Verifies identity, informs about the request,
+      confirms eligibility, and guides through Scope Portal or
+      Tel-e-Scope app to accept the order.
+    version: "1.0"
+    tags:
+      - "process:spare_care"
+      - "state:part_request_pending"
+    priority: 15
+    objective: "Get seller to accept pending part request via Scope Portal or Tel-e-Scope app"
+    composable: false
+
+    # ── Response Categories ──────────────────────────────
+    # Encodes 40+ real user response scenarios from production
+    # data, grouped into 10 categories with action types.
+    response_categories:
+
+      - id: availability_busy
+        label: "Availability / Busy / Callback"
+        action: callback
+        triggers:
+          - "I am currently busy"
+          - "I'm closing the agency now"
+          - "I will call you shortly"
+          - "Call me tomorrow"
+          - "I don't have time right now"
+          - "Please don't keep calling repeatedly"
+          - "I am driving, I'll call you back later"
+          - "I'm travelling at the moment"
+          - "No staff is available at the shop right now"
+          - "I am out of town at the moment"
+          - "I am recovering from illness"
+          - "I am at the hospital right now"
+          - "I have a medical appointment"
+          - "I have guests at home"
+        agent_guidance: >
+          Acknowledge politely. Say: "I understand you're busy. Please accept the
+          order request when you can, or share a convenient time so I can call back
+          and explain the details. It will only take a little time." If medical or
+          personal reason, be empathetic and wish them well. Always ask for a callback time.
+
+      - id: followup_pending
+        label: "Follow-up / Pending Confirmation"
+        action: callback
+        triggers:
+          - "I will check with my team and get back to you"
+          - "I'm not at the agency today"
+          - "I will update you by end of the day"
+          - "I will confirm after checking with my manager"
+          - "I need to verify stock first"
+        agent_guidance: >
+          Acknowledge their need for time. Say: "Thank you. Please let me know when
+          you can confirm the order request. I can call you after one hour as the part
+          is urgent." Offer the alternative of accepting via the app or Scope portal.
+
+      - id: wrong_contact
+        label: "Wrong Contact / Wrong Number"
+        action: disconnect
+        triggers:
+          - "This is the wrong number"
+          - "You have the wrong person"
+          - "I am not the seller you're looking for"
+          - "I lost a family member yesterday"
+        agent_guidance: >
+          Apologize immediately. Say: "Thank you for informing us. We'll update our
+          records." If they mention bereavement, express sincere condolences.
+          Ask if they can share the correct contact for the seller account.
+          Disconnect politely.
+
+      - id: approval_pricing
+        label: "Approval / Pricing Issues"
+        action: callback
+        triggers:
+          - "I cannot provide the part at this discount"
+          - "The price is not finalized yet"
+          - "I have not received management approval yet"
+          - "I will respond after discussing internally whether we can offer this discount"
+        agent_guidance: >
+          Acknowledge the concern. Say: "Understood. Could you please share the final
+          part price you are looking for?" or "Please let me know when the approval
+          is expected, as this request is urgent." Offer to call back once finalized.
+
+      - id: technical_app_issue
+        label: "Technical / System / App Issues"
+        action: disconnect
+        triggers:
+          - "I'm facing a login issue"
+          - "The order page is not loading"
+          - "The app crashed after login"
+          - "My system is under maintenance"
+          - "Internet connectivity is poor right now"
+          - "Power is not available at the shop"
+          - "The system is not working at the moment"
+        agent_guidance: >
+          Troubleshoot step by step. Ask: "Could you please share the issue you're
+          facing and the error message shown?" For internet issues: "Please take your
+          time and proceed once the connection is stable." For system maintenance:
+          "You may also use your mobile application to process the order request."
+          If unresolved, note the issue for technical support follow-up.
+
+      - id: stock_inventory
+        label: "Stock / Inventory / Part Issues"
+        action: disconnect
+        triggers:
+          - "The part is damaged so I cannot accept the request"
+          - "Stock is showing but physically it's not available"
+          - "The part is reserved for another dealer"
+          - "The part has just arrived"
+        agent_guidance: >
+          For damaged/unavailable parts: "Thank you for confirming. Please reject
+          the request and update your inventory so it doesn't show as available."
+          For parts just arrived: "Great! Please accept the order request via the
+          app or portal." For reserved parts: "Please reject the request so it no
+          longer appears in your system."
+
+      - id: staff_responsibility
+        label: "Staff / Responsibility / Contact Issues"
+        action: disconnect
+        triggers:
+          - "I am not the right contact person"
+          - "The staff member is not available today"
+          - "I am no longer handling this account"
+          - "I have stopped working with the dealership"
+          - "The person who handles orders is not available"
+          - "The system access is with another person"
+        agent_guidance: >
+          For wrong person: "Thank you for informing us. Your number is still linked
+          to this account. Could you please share the new contact person's details
+          so we can update our system?" For left company: "Thank you for informing us.
+          We'll remove your number so you won't receive further calls." Always try
+          to get the correct contact details before disconnecting.
+
+      - id: email_coordination
+        label: "Email / Written Communication Preference"
+        action: disconnect
+        triggers:
+          - "Please coordinate through email"
+          - "Send details on WhatsApp"
+          - "I prefer written communication"
+        agent_guidance: >
+          Explain the urgency: "We completely understand. We initially reached out
+          via email and WhatsApp. Given the urgency of the part request, we're
+          following up with a quick call. We hope you understand." If they still
+          insist, note that you'll send details via their preferred channel.
+
+      - id: portal_visibility
+        label: "Order / Portal / Visibility Issues"
+        action: disconnect
+        triggers:
+          - "I am unable to see any order in my portal"
+          - "The order is not showing up"
+          - "I can't find the request"
+        agent_guidance: >
+          Guide step by step: "I believe you should check on the correct page.
+          Let me guide you. Please log in to your portal, go to Spare Care,
+          open Order Status, and then click on Sales Orders. Now you should be
+          able to view all part requests there." If still not visible, note
+          the issue for escalation.
+
+      - id: pending_unresolved
+        label: "Pending / Unresolved Previous Issues"
+        action: disconnect
+        triggers:
+          - "My previous issue is not settled yet"
+          - "The earlier issue is still unresolved"
+          - "You didn't fix the earlier problem"
+        agent_guidance: >
+          Apologize: "We apologize for the inconvenience. Please share your issue
+          reference number so we can assist you quickly." Check their previous issue.
+          Meanwhile, request: "We kindly request you to accept the part order so
+          we can proceed without delay while we resolve the earlier issue."
+
+    # ── Variables ────────────────────────────────────────
+    variables:
+      - name: seller_name
+        source: contact.name
+        default: "Sir/Madam"
+      - name: part_names
+        source: business_data.part_names
+        required: true
+      - name: part_quantity
+        source: business_data.part_quantity
+        required: true
+      - name: request_date
+        source: business_data.request_date
+        format: date
+        default: ""
+      - name: order_id
+        source: business_data.order_id
+        default: ""
+      - name: order_value
+        source: business_data.order_value
+        format: currency
+        default: ""
+      - name: pending_order_count
+        source: business_data.pending_order_count
+        default: ""
+
+    default_channel_config:
+      voice:
+        tone: warm_professional
+        max_length: 200
+
+    on_enter:
+      - type: log
+        message: "Starting Spare Care followup for {{seller_name}}, parts: {{part_names}}"
+
+    # ── Steps (Conversation Flow) ────────────────────────
+    steps:
+
+      # ─── Step 1: Identity Verification ─────────────────
+      - id: identity_check
+        type: generate
+        description: Verify caller identity
+        system_prompt: >
+          You are calling on behalf of the Spare Care Support Team.
+          Your first task is to verify you're speaking with the correct person.
+          Say your greeting naturally, then ask "Am I speaking with {{seller_name}}?"
+          CRITICAL: Keep it to 2 sentences max. Be warm and professional.
+        user_prompt: >
+          Seller: {{seller_name}}
+          Greet and verify: "Hello, this is an automated call from Spare Care
+          Support Team. Am I speaking with {{seller_name}}?"
+        constraints:
+          max_tokens: 80
+          temperature: 0.5
+        next: collect_identity
+
+      - id: collect_identity
+        type: collect
+        expected_intents:
+          - identity_confirmed
+          - identity_denied
+          - identity_partial
+          - who_is_calling
+        timeout_seconds: 10
+        timeout_goto: identity_retry
+
+      - id: identity_retry
+        type: generate
+        description: Retry identity verification
+        system_prompt: >
+          The person hasn't confirmed their identity. Ask once more naturally.
+          "Am I speaking with {{seller_name}}?" Keep it brief.
+        user_prompt: >
+          Ask again if this is {{seller_name}}. One sentence.
+        constraints:
+          max_tokens: 40
+        next: collect_identity_retry
+
+      - id: collect_identity_retry
+        type: collect
+        expected_intents:
+          - identity_confirmed
+          - identity_denied
+        timeout_seconds: 8
+        timeout_goto: state_purpose
+
+      - id: route_identity
+        type: branch
+        arms:
+          - conditions:
+              - field: _last_intent
+                operator: eq
+                value: "identity_denied"
+            goto: wrong_person
+          - goto: state_purpose
+
+      # ─── Step 1_no: Wrong Person ───────────────────────
+      - id: wrong_person
+        type: generate
+        description: Handle wrong person
+        system_prompt: >
+          The person on the phone is NOT {{seller_name}}.
+          Apologize briefly. Ask if they can share the correct contact
+          person or number for this seller account. Be polite and brief.
+          Say: "Thank you for letting us know. Could you please help us
+          by confirming the correct contact person or number for this
+          seller account?"
+        user_prompt: >
+          Wrong person answered. Ask for correct contact for {{seller_name}}.
+        constraints:
+          max_tokens: 100
+        next: farewell_wrong
+
+      # ─── Step 2: State Purpose ─────────────────────────
+      - id: state_purpose
+        type: generate
+        description: State the reason for calling with part request details
+        system_prompt: >
+          Identity is confirmed. Now clearly state the purpose.
+          You are calling to inform about a pending part request raised
+          by SpareCare. Mention the specific parts, quantity, and request date.
+          Also mention that these parts are currently showing as available
+          in their inventory. Be professional, clear, and concise.
+          Say quantities and amounts naturally.
+        user_prompt: >
+          Seller: {{seller_name}}
+          Parts requested: {{part_names}}
+          Quantity: {{part_quantity}}
+          Request date: {{request_date}}
+
+          Say: "We are calling to inform you that a part request with a quantity
+          of {{part_quantity}} has been raised in your account by SpareCare on
+          {{request_date}}. The requested parts are {{part_names}}. Our system
+          shows that these parts are currently available in your inventory."
+        constraints:
+          max_tokens: 150
+          temperature: 0.5
+        next: confirmation_ask
+
+      # ─── Step 3: Confirmation ──────────────────────────
+      - id: confirmation_ask
+        type: generate
+        description: Ask if seller can accept the part request
+        system_prompt: >
+          Now ask the seller to confirm whether they can accept this
+          part request. The request is still pending. Be direct but polite.
+          Say: "At the moment, the request is still pending and hasn't been
+          accepted. Could you please confirm whether you are eligible and
+          available to accept this part request?"
+        user_prompt: >
+          Ask {{seller_name}} to confirm eligibility to accept the request.
+        constraints:
+          max_tokens: 80
+          temperature: 0.5
+        next: collect_confirmation
+
+      - id: collect_confirmation
+        type: collect
+        expected_intents:
+          - can_accept
+          - cannot_accept
+          - busy_callback
+          - technical_issue
+          - stock_issue
+          - pricing_issue
+          - need_info
+          - previous_issue
+          - not_my_account
+        timeout_seconds: 15
+        timeout_goto: confirmation_retry
+
+      - id: confirmation_retry
+        type: generate
+        description: Gently ask again
+        system_prompt: >
+          The seller hasn't responded clearly. Ask once more naturally.
+          "Can you accept this part request?" Keep it brief.
+        user_prompt: >
+          Ask {{seller_name}} again about accepting the part request. One sentence.
+        constraints:
+          max_tokens: 40
+        next: collect_confirmation_retry
+
+      - id: collect_confirmation_retry
+        type: collect
+        expected_intents:
+          - can_accept
+          - cannot_accept
+          - busy_callback
+        timeout_seconds: 10
+        timeout_goto: guide_portal_accept
+
+      # ─── Step 3_yes: Guide to Accept ──────────────────
+      - id: guide_portal_accept
+        type: generate
+        description: Guide seller to accept via Scope Portal or app
+        system_prompt: >
+          The seller can accept! Guide them clearly:
+          1. Log in to Scope Portal or Tel-e-Scope mobile app
+          2. Navigate to the part request
+          3. Accept the order request
+          4. Upload clear images of the parts
+
+          Say: "Kindly log in to your Scope Portal or the Tel-e-Scope mobile
+          app and accept the order request. Please ensure you upload clear
+          images of the parts at the earliest so the order can be processed
+          smoothly. If you need any assistance, our support team will be
+          happy to help."
+
+          Keep it warm and supportive. Offer help if needed.
+        user_prompt: >
+          Guide {{seller_name}} to accept via portal/app and upload images.
+        constraints:
+          max_tokens: 150
+          temperature: 0.5
+        next: farewell_positive
+
+      # ─── Step 3_no: Handle Rejection ───────────────────
+      - id: handle_rejection
+        type: generate
+        description: Ask reason for not accepting
+        system_prompt: >
+          The seller cannot accept the part request. Ask for the specific reason.
+          Also mention the pending order details to emphasize importance.
+          Say: "May we know the reason for not accepting the order? We can see
+          that there are pending order requests in your account."
+          Be understanding but highlight the value.
+        user_prompt: >
+          {{seller_name}} cannot accept. Ask for reason.
+          Pending orders: {{order_id}}, value: {{order_value}} INR.
+          Total pending: {{pending_order_count}} requests.
+        constraints:
+          max_tokens: 120
+          temperature: 0.5
+        next: collect_rejection_reason
+
+      - id: collect_rejection_reason
+        type: collect
+        expected_intents:
+          - busy_reason
+          - stock_unavailable
+          - pricing_concern
+          - technical_problem
+          - staff_issue
+          - previous_issue_unresolved
+          - wants_email
+        timeout_seconds: 15
+        timeout_goto: farewell_callback
+
+      # ─── Step 3_no_busy: Callback Request ──────────────
+      - id: handle_busy_callback
+        type: generate
+        description: Schedule a callback
+        system_prompt: >
+          The seller is busy or unavailable. Be respectful.
+          Say: "Thank you for letting us know. We understand you're not
+          available right now. Please share a convenient time for a
+          callback, so we'll reach out accordingly."
+          Note their preferred callback time.
+        user_prompt: >
+          {{seller_name}} is busy. Ask for convenient callback time.
+        constraints:
+          max_tokens: 80
+        next: collect_callback_time
+
+      - id: collect_callback_time
+        type: collect
+        expected_intents:
+          - time_given
+          - no_time_given
+          - will_call_back
+        entity_extraction:
+          - callback_time
+          - callback_date
+        timeout_seconds: 10
+        timeout_goto: farewell_callback
+
+      # ─── Step 3_no_issue: Issue Resolution ─────────────
+      - id: handle_previous_issue
+        type: generate
+        description: Handle unresolved previous issue
+        system_prompt: >
+          The seller has an unresolved previous issue blocking them.
+          Apologize and ask for the issue reference number.
+          Say: "We apologize for the inconvenience. Please share your issue
+          reference number so we can assist you quickly. Meanwhile, we
+          kindly request you to accept the part order so we can proceed
+          without delay."
+          Be empathetic but try to unblock the current request.
+        user_prompt: >
+          {{seller_name}} has a previous unresolved issue.
+          Ask for reference number and request they still accept the order.
+        constraints:
+          max_tokens: 120
+        next: farewell_issue
+
+      # ─── Step 4: Portal Guidance ───────────────────────
+      - id: guide_portal_navigation
+        type: generate
+        description: Guide through portal to find the order
+        system_prompt: >
+          The seller can't find the order on their portal.
+          Guide them step by step through the correct navigation:
+          1. Log in to the portal
+          2. Go to "Spare Care" section
+          3. Open "Order Status"
+          4. Click on "Sales Orders"
+          5. The part requests should be visible there
+
+          Say: "Let me guide you quickly. Please log in to your portal,
+          go to Spare Care, open Order Status, and then click on Sales Orders.
+          You should be able to view all part requests there."
+        user_prompt: >
+          Guide {{seller_name}} to find orders: Portal > Spare Care > Order Status > Sales Orders.
+        constraints:
+          max_tokens: 150
+        next: farewell_positive
+
+      # ─── Farewell Steps ────────────────────────────────
+      - id: farewell_positive
+        type: generate
+        description: Positive call wrap-up
+        system_prompt: >
+          Wrap up the call positively. Thank the seller for their time
+          and cooperation. Confirm they know what to do next (accept on
+          portal, upload images). Offer support if needed.
+          End with "Thank you and have a good day."
+        user_prompt: >
+          Thank {{seller_name}} and wrap up positively.
+        constraints:
+          max_tokens: 60
+
+      - id: farewell_callback
+        type: generate
+        description: Callback scheduling wrap-up
+        system_prompt: >
+          Confirm the callback time. Thank them for their time.
+          Say you'll call back at the agreed time. Also mention they can
+          accept the request via the app in the meantime.
+          End politely.
+        user_prompt: >
+          Confirm callback with {{seller_name}} and end call.
+        constraints:
+          max_tokens: 60
+
+      - id: farewell_wrong
+        type: generate
+        description: Wrong person wrap-up
+        system_prompt: >
+          Wrong person. Thank them for the information. If they provided
+          a correct contact, acknowledge it. Say you'll update records.
+          Disconnect politely. Keep it very brief.
+        user_prompt: >
+          Thank the person and disconnect. Very brief.
+        constraints:
+          max_tokens: 40
+
+      - id: farewell_issue
+        type: generate
+        description: Issue-related wrap-up
+        system_prompt: >
+          The seller has an issue. Confirm you've noted it. Promise follow-up.
+          If they shared a reference number, confirm it. Say a team member
+          will look into it. Thank them and disconnect.
+        user_prompt: >
+          Confirm issue noted for {{seller_name}} and wrap up.
+        constraints:
+          max_tokens: 60

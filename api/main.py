@@ -603,18 +603,21 @@ async def twilio_media_stream(websocket: WebSocket, call_sid: str):
 
     from voice.bot import run_voice_bot
 
-    # Build system prompt from any stored call context
+    # Build system prompt from stored call context
     system_prompt = ""
     call_state = voice_adapter._active_calls.get(call_sid)
-    if call_state and hasattr(call_state, "tts_queue") and call_state.tts_queue:
-        # Use the initial message as context for the greeting
-        initial_msg = call_state.tts_queue[0]
-        system_prompt = (
-            f"You are a professional follow-up agent on a live phone call. "
-            f"Your opening line should convey this message: '{initial_msg}'. "
-            f"Keep responses to 1-3 short sentences. Use natural spoken language. "
-            f"Never use markdown or text formatting. Be warm and conversational."
-        )
+    if call_state:
+        # Use flow-based or custom system prompt if available
+        if hasattr(call_state, "system_prompt") and call_state.system_prompt:
+            system_prompt = call_state.system_prompt
+        elif hasattr(call_state, "tts_queue") and call_state.tts_queue:
+            initial_msg = call_state.tts_queue[0]
+            system_prompt = (
+                f"You are a professional follow-up agent on a live phone call. "
+                f"Your opening line should convey this message: '{initial_msg}'. "
+                f"Keep responses to 1-3 short sentences. Use natural spoken language. "
+                f"Never use markdown or text formatting. Be warm and conversational."
+            )
 
     try:
         await run_voice_bot(
@@ -773,6 +776,194 @@ class OutboundCallRequest(BaseModel):
     to: str  # Phone number in E.164 format (e.g. +919966990732)
     greeting: str = "Hello! I'm calling to follow up with you. How can I help you today?"
     system_prompt: str = ""
+    flow_id: str = ""  # Dialog flow ID (e.g. "dealer_order_followup")
+    variables: dict[str, Any] = {}  # Flow variables (e.g. {"dealer_name": "Ramesh", ...})
+
+
+def _load_flow(flow_id: str) -> dict | None:
+    """Load a dialog flow definition by ID from config/flows/*.yaml files."""
+    from pathlib import Path
+    import yaml
+
+    flows_dir = Path("config/flows")
+    if not flows_dir.exists():
+        return None
+    for yaml_file in flows_dir.glob("*.yaml"):
+        try:
+            with open(yaml_file) as f:
+                data = yaml.safe_load(f) or {}
+            for flow in data.get("flows", []):
+                if flow.get("id") == flow_id:
+                    return flow
+        except Exception:
+            continue
+    return None
+
+
+def _load_customer_data(phone_number: str, flow_id: str = "") -> dict[str, Any]:
+    """
+    Load customer-specific variables by phone number from config/customer_data/*.yaml.
+
+    Searches all YAML files in config/customer_data/ for a matching phone number.
+    If flow_id is provided, prioritizes files that declare that flow_id.
+    Returns merged dict of defaults + customer overrides, or empty dict if not found.
+    """
+    from pathlib import Path
+    import yaml
+
+    data_dir = Path("config/customer_data")
+    if not data_dir.exists():
+        return {}
+
+    # Normalize phone number
+    phone_number = phone_number.strip()
+
+    for yaml_file in data_dir.glob("*.yaml"):
+        try:
+            with open(yaml_file) as f:
+                data = yaml.safe_load(f) or {}
+
+            file_flow_id = data.get("flow_id", "")
+            customers = data.get("customers", {})
+            defaults = data.get("defaults", {})
+
+            # If flow_id specified, skip files that don't match
+            if flow_id and file_flow_id and file_flow_id != flow_id:
+                continue
+
+            if phone_number in customers:
+                merged = {**defaults, **customers[phone_number]}
+                # Also include the file's flow_id for auto-selection
+                if file_flow_id and "_flow_id" not in merged:
+                    merged["_flow_id"] = file_flow_id
+                return merged
+        except Exception:
+            continue
+
+    return {}
+
+
+def _build_flow_system_prompt(flow: dict, variables: dict[str, Any]) -> str:
+    """
+    Build a comprehensive LLM system prompt from a dialog flow definition.
+
+    Converts the flow's steps, branches, and prompts into a conversation guide
+    that the LLM can follow naturally on a live voice call.
+    """
+    flow_name = flow.get("name", "Follow-Up Call")
+    objective = flow.get("objective", "")
+
+    # Resolve variables: use provided values, fall back to flow defaults
+    resolved_vars = {}
+    for var_def in flow.get("variables", []):
+        name = var_def["name"]
+        resolved_vars[name] = variables.get(name, var_def.get("default", ""))
+
+    # Collect generate steps with their system and user prompts
+    steps = flow.get("steps", [])
+    conversation_stages = []
+    for step in steps:
+        if step.get("type") not in ("generate", "message"):
+            continue
+        step_id = step.get("id", "")
+        description = step.get("description", step_id.replace("_", " ").title())
+        sys_prompt = step.get("system_prompt", "")
+        usr_prompt = step.get("user_prompt", "")
+
+        # Template-substitute variables into prompts
+        for key, val in resolved_vars.items():
+            sys_prompt = sys_prompt.replace("{{" + key + "}}", str(val))
+            usr_prompt = usr_prompt.replace("{{" + key + "}}", str(val))
+
+        if sys_prompt or usr_prompt:
+            conversation_stages.append({
+                "id": step_id,
+                "description": description,
+                "guidance": sys_prompt.strip(),
+                "context": usr_prompt.strip(),
+            })
+
+    # Collect expected intents from collect steps
+    collect_intents = []
+    for step in steps:
+        if step.get("type") == "collect":
+            intents = step.get("expected_intents", [])
+            if intents:
+                collect_intents.extend(intents)
+
+    # Build the prompt
+    lines = [
+        f"You are a voice agent conducting a '{flow_name}' call.",
+        f"OBJECTIVE: {objective}" if objective else "",
+        "",
+        "IMPORTANT RULES:",
+        "- You are on a LIVE PHONE CALL. Keep every response to 1-3 short sentences.",
+        "- Use natural spoken language. Never use markdown, bullets, or formatting.",
+        "- Be warm, professional, and conversational.",
+        "- Indian business culture values personal connection — be respectful.",
+        "- Say amounts naturally (e.g., 'fifty thousand' not '50,000').",
+        "- Listen carefully to the caller and respond to what they actually say.",
+        "",
+        "CALLER INFORMATION:",
+    ]
+    for key, val in resolved_vars.items():
+        if val:
+            label = key.replace("_", " ").title()
+            lines.append(f"- {label}: {val}")
+
+    lines.append("")
+    lines.append("CONVERSATION FLOW (follow these stages in order):")
+    lines.append("")
+    for i, stage in enumerate(conversation_stages, 1):
+        lines.append(f"Stage {i} — {stage['description']}:")
+        if stage["guidance"]:
+            lines.append(f"  Guidance: {stage['guidance']}")
+        if stage["context"]:
+            lines.append(f"  Context: {stage['context']}")
+        lines.append("")
+
+    if collect_intents:
+        unique_intents = list(dict.fromkeys(collect_intents))  # dedupe, preserve order
+        lines.append("POSSIBLE CALLER RESPONSES TO HANDLE:")
+        for intent in unique_intents:
+            label = intent.replace("_", " ").title()
+            lines.append(f"- {label}")
+        lines.append("")
+
+    # Response categories: encode user response handling rules
+    response_categories = flow.get("response_categories", [])
+    if response_categories:
+        lines.append("RESPONSE HANDLING RULES:")
+        lines.append("When the caller says something matching these categories, follow the guidance:")
+        lines.append("")
+        for cat in response_categories:
+            cat_label = cat.get("label", cat.get("id", "").replace("_", " ").title())
+            action = cat.get("action", "callback").upper()
+            triggers = cat.get("triggers", [])
+            guidance = cat.get("agent_guidance", "")
+
+            lines.append(f"  [{cat_label}] (Action: {action})")
+            if triggers:
+                examples = ", ".join(f'"{t}"' for t in triggers[:5])
+                lines.append(f"    Examples: {examples}")
+            if guidance:
+                lines.append(f"    How to respond: {guidance.strip()}")
+            lines.append("")
+
+        lines.append("ACTION DEFINITIONS:")
+        lines.append("- CALLBACK: Ask for a convenient callback time. Confirm. End call politely.")
+        lines.append("- DISCONNECT: Resolve the concern or note for follow-up. End call politely.")
+        lines.append("")
+
+    lines.append(
+        "FLOW: Start with the first stage, then follow the stages above in order. "
+        "After each response, WAIT and LISTEN for the caller's reply before proceeding. "
+        "Adapt naturally based on what they say — don't rigidly read a script. "
+        "If the caller's response matches a RESPONSE HANDLING RULE, follow that guidance "
+        "instead of continuing the normal flow."
+    )
+
+    return "\n".join(line for line in lines if line is not None)
 
 
 @app.post("/api/v1/voice/outbound")
@@ -826,10 +1017,47 @@ async def initiate_outbound_call(req: OutboundCallRequest):
         )
         call_sid = result.get("sid", "")
 
+        # Auto-lookup customer data by phone number
+        effective_variables = dict(req.variables)
+        effective_flow_id = req.flow_id
+        effective_greeting = req.greeting
+        effective_prompt = req.system_prompt or ""
+
+        if effective_flow_id:
+            customer_data = _load_customer_data(req.to, effective_flow_id)
+            if customer_data:
+                # Customer data is base; user-provided variables override
+                merged = {k: v for k, v in customer_data.items() if not k.startswith("_")}
+                merged.update({k: v for k, v in req.variables.items() if v})
+                effective_variables = merged
+                logger.info("customer_data_loaded", phone=req.to,
+                            flow_id=effective_flow_id,
+                            seller=customer_data.get("seller_name", ""))
+        elif not req.system_prompt:
+            # No flow_id specified — try auto-detecting from customer data
+            customer_data = _load_customer_data(req.to)
+            if customer_data and "_flow_id" in customer_data:
+                effective_flow_id = customer_data.pop("_flow_id")
+                merged = {k: v for k, v in customer_data.items() if not k.startswith("_")}
+                merged.update({k: v for k, v in req.variables.items() if v})
+                effective_variables = merged
+                logger.info("customer_auto_detected", phone=req.to,
+                            flow_id=effective_flow_id,
+                            seller=customer_data.get("seller_name", ""))
+
+        if effective_flow_id:
+            flow_def = _load_flow(effective_flow_id)
+            if flow_def:
+                effective_prompt = _build_flow_system_prompt(flow_def, effective_variables)
+                logger.info("flow_loaded", flow_id=effective_flow_id,
+                            flow_name=flow_def.get("name"))
+            else:
+                logger.warning("flow_not_found", flow_id=effective_flow_id)
+
         # Store call context so the WS handler can pick it up
         voice_adapter._active_calls[call_sid] = type("CallState", (), {
-            "tts_queue": [req.greeting],
-            "system_prompt": req.system_prompt or "",
+            "tts_queue": [effective_greeting],
+            "system_prompt": effective_prompt,
         })()
 
         logger.info("outbound_call_initiated",
